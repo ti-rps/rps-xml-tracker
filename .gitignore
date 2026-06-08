@@ -1,0 +1,10 @@
+# compiled binaries
+/api
+/tracker-api
+*.exe
+# local env / secrets
+.env
+.env.local
+# go test/coverage artifacts
+*.out
+coverage.*
