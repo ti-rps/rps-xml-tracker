@@ -1,0 +1,276 @@
+openapi: 3.0.3
+info:
+  title: rps-xml-tracker API
+  version: 0.1.0-draft
+  description: >
+    API de rastreabilidade de XML (notas fiscais) da RPS Contábil. Entregável de 1ª classe:
+    o frontend do rps-maestro (maestro_web) consome esta API numa seção /xml.
+    Convenções espelham o maestro: base /api/v1, JWT Bearer (HS256, MAESTRO_JWT_SECRET),
+    erros {"error": "..."}, listas {items,total,limit,offset}, datas ISO-8601.
+    RASCUNHO para revisão (Fase 1 MVP). Reflete os achados da Fase 0.
+
+servers:
+  - url: /api/v1
+
+components:
+  securitySchemes:
+    bearerAuth:        # leitura (UI do maestro) — papéis admin/operator/viewer
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    agentHmac:         # ingestão (agente no SRVIMPORT) — HMAC compartilhado, NÃO JWT
+      type: apiKey
+      in: header
+      name: X-Agent-Signature
+  schemas:
+    Error:
+      type: object
+      properties: { error: { type: string } }
+    DocType:
+      type: string
+      enum: [NFE, NFCE, CTE, NFS, EVENTO, UNKNOWN]
+    NotaStatus:
+      type: string
+      enum: [arrived, synced, imported, import_ignored, pending_import, stuck, lost]
+    Observation:           # item de ingestão enviado pelo agente
+      type: object
+      required: [stage, event_type, observed_at]
+      properties:
+        chave_acesso: { type: string, minLength: 44, maxLength: 44, nullable: true }
+        stage:        { type: string, enum: [arrival, sync, import] }
+        event_type:   { type: string, example: file_seen }
+        observed_at:  { type: string, format: date-time }
+        doc_type:     { $ref: '#/components/schemas/DocType' }
+        file_path:    { type: string, nullable: true }
+        file_hash:    { type: string, nullable: true, description: md5 do conteúdo }
+        codigo_empresa: { type: integer, nullable: true }
+        codigo_filial:  { type: integer, nullable: true }
+        payload:      { type: object, additionalProperties: true, nullable: true }
+    Span:
+      type: object
+      properties:
+        stage:       { type: string, enum: [arrival, sync, import] }
+        event_type:  { type: string }
+        observed_at: { type: string, format: date-time }
+        source:      { type: string, example: 'agent:SRVIMPORT' }
+        file_path:   { type: string, nullable: true }
+    Nota:
+      type: object
+      properties:
+        chave_acesso:     { type: string }
+        doc_type:         { $ref: '#/components/schemas/DocType' }
+        status:           { $ref: '#/components/schemas/NotaStatus' }
+        empresa:          { $ref: '#/components/schemas/EmpresaRef' }
+        cnpj_emitente:    { type: string, nullable: true }
+        cnpj_destinatario: { type: string, nullable: true }
+        arrived_at:       { type: string, format: date-time, nullable: true }
+        synced_at:        { type: string, format: date-time, nullable: true }
+        imported_at:      { type: string, format: date-time, nullable: true }
+        import_ignored:   { type: boolean }
+        motivo_ignorado:  { type: string, nullable: true }
+        valor_total:      { type: number, nullable: true }
+        data_emissao:     { type: string, format: date, nullable: true }
+        lat_arrival_sync_s: { type: integer, nullable: true }
+        lat_sync_import_s:  { type: integer, nullable: true }
+    NotaDetail:
+      allOf:
+        - $ref: '#/components/schemas/Nota'
+        - type: object
+          properties:
+            spans: { type: array, items: { $ref: '#/components/schemas/Span' } }
+    EmpresaRef:
+      type: object
+      properties:
+        codigo_empresa: { type: integer }
+        codigo_filial:  { type: integer }
+        nome:           { type: string, nullable: true }
+    EmpresaPendencias:
+      type: object
+      properties:
+        empresa:        { $ref: '#/components/schemas/EmpresaRef' }
+        arrived:        { type: integer }
+        synced:         { type: integer }
+        imported:       { type: integer }
+        import_ignored: { type: integer }
+        pending_import: { type: integer }
+        stuck:          { type: integer }
+        lost:           { type: integer }
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      summary: Liveness (sem auth)
+      security: []
+      responses: { '200': { description: ok } }
+
+  # ───────── Ingestão (agente SRVIMPORT — HMAC, não JWT) ─────────
+  /ingest/observations:
+    post:
+      summary: Recebe um lote de observações do agente (idempotente por dedup_key)
+      security: [ { agentHmac: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent, batch]
+              properties:
+                agent: { type: string, example: 'SRVIMPORT' }
+                batch:
+                  type: array
+                  items: { $ref: '#/components/schemas/Observation' }
+      responses:
+        '202':
+          description: aceito
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted: { type: integer }
+                  rejected: { type: integer }
+        '401': { description: assinatura inválida, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  # ───────── Leitura (UI do maestro — JWT viewer+) ─────────
+  /notas:
+    get:
+      summary: Lista notas (estado derivado) com filtros
+      parameters:
+        - { name: status,   in: query, schema: { $ref: '#/components/schemas/NotaStatus' } }
+        - { name: doc_type, in: query, schema: { $ref: '#/components/schemas/DocType' } }
+        - { name: codigo_empresa, in: query, schema: { type: integer } }
+        - { name: cnpj,     in: query, schema: { type: string }, description: emitente ou destinatário }
+        - { name: q,        in: query, schema: { type: string }, description: chave de acesso (parcial/total) }
+        - { name: from,     in: query, schema: { type: string, format: date } }
+        - { name: to,       in: query, schema: { type: string, format: date } }
+        - { name: limit,    in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset,   in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:  { type: array, items: { $ref: '#/components/schemas/Nota' } }
+                  total:  { type: integer }
+                  limit:  { type: integer }
+                  offset: { type: integer }
+
+  /notas/{chave}:
+    get:
+      summary: Detalhe de uma nota + timeline de spans (todas as observations da chave)
+      parameters:
+        - { name: chave, in: path, required: true, schema: { type: string, minLength: 44, maxLength: 44 } }
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/NotaDetail' } } } }
+        '404': { description: não encontrada, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+
+  /empresas:
+    get:
+      summary: Empresas com contagem por status (quem está pendente)
+      parameters:
+        - { name: pendentes, in: query, schema: { type: boolean }, description: só empresas com itens não-terminais }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/EmpresaPendencias' } }
+                  total: { type: integer }
+
+  /nfse/import:
+    get:
+      summary: Status de IMPORTAÇÃO de NFSe (lado Firebird, sem etapa de chegada) por empresa/período
+      description: NFSe não tem chave de 44 dígitos no filesystem (Fase 0) — só rastreamos o estado de import no Athenas.
+      parameters:
+        - { name: codigo_empresa, in: query, schema: { type: integer } }
+        - { name: status, in: query, schema: { type: string, enum: [imported, import_ignored, pending_import] } }
+        - { name: from,   in: query, schema: { type: string, format: date } }
+        - { name: to,     in: query, schema: { type: string, format: date } }
+        - { name: limit,  in: query, schema: { type: integer, default: 50, maximum: 200 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        athenas_chave: { type: string }
+                        empresa:       { $ref: '#/components/schemas/EmpresaRef' }
+                        status:        { type: string }
+                        motivo_ignorado: { type: string, nullable: true }
+                        data_emissao:  { type: string, format: date, nullable: true }
+                        valor_total:   { type: number, nullable: true }
+                  total: { type: integer }
+
+  /metrics/overview:
+    get:
+      summary: Cards do dashboard (totais por etapa, em trânsito, importadas hoje, ignoradas, latências p50/p95)
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  arrived:         { type: integer }
+                  synced:          { type: integer }
+                  imported_today:  { type: integer }
+                  import_ignored:  { type: integer }
+                  in_transit:      { type: integer }
+                  stuck:           { type: integer }
+                  lost:            { type: integer }
+                  lat_arrival_sync_p50_s: { type: integer, nullable: true }
+                  lat_arrival_sync_p95_s: { type: integer, nullable: true }
+                  lat_sync_import_p50_s:  { type: integer, nullable: true }
+                  lat_sync_import_p95_s:  { type: integer, nullable: true }
+
+  /metrics/throughput:
+    get:
+      summary: Série temporal (notas por etapa por bucket) para gráficos
+      parameters:
+        - { name: bucket, in: query, schema: { type: string, enum: [hour, day], default: hour } }
+        - { name: from,   in: query, schema: { type: string, format: date-time } }
+        - { name: to,     in: query, schema: { type: string, format: date-time } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        t:        { type: string, format: date-time }
+                        arrived:  { type: integer }
+                        synced:   { type: integer }
+                        imported: { type: integer }
+
+  /jobs/{maestroJobId}/notas:
+    get:
+      summary: Notas correlacionadas a um job do maestro (fase posterior — pode vir vazio no MVP)
+      parameters:
+        - { name: maestroJobId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { type: object, properties: { items: { type: array, items: { $ref: '#/components/schemas/Nota' } }, total: { type: integer } } } } } }
