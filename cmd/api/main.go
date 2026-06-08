@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -29,7 +30,19 @@ func main() {
 		st = store.NewMemory()
 		log.Println("store: in-memory (NÃO persistente — só dev/smoke)")
 	case "postgres":
-		log.Fatal("store: postgres ainda não implementado (próxima fatia)")
+		dsn := os.Getenv("TRACKER_PG_DSN")
+		if dsn == "" {
+			log.Fatal("store: TRACKER_PG_DSN é obrigatório com TRACKER_STORE=postgres")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		pg, err := store.NewPostgres(ctx, dsn)
+		if err != nil {
+			log.Fatalf("store: postgres: %v", err)
+		}
+		defer pg.Close()
+		st = pg
+		log.Println("store: postgres")
 	default:
 		log.Fatalf("store: valor inválido para TRACKER_STORE")
 	}

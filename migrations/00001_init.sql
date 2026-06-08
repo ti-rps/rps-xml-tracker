@@ -43,6 +43,8 @@ CREATE TABLE notas (
   doc_type          doc_type    NOT NULL,
   status            nota_status NOT NULL,
   empresa_id        BIGINT REFERENCES empresas(id),
+  codigo_empresa    INTEGER,
+  codigo_filial     INTEGER,
   cnpj_emitente     VARCHAR(20),
   cnpj_destinatario VARCHAR(20),
   maestro_job_id    UUID,
@@ -60,7 +62,7 @@ CREATE TABLE notas (
   lat_sync_import_s  BIGINT
 );
 CREATE INDEX idx_notas_status   ON notas (status);
-CREATE INDEX idx_notas_empresa  ON notas (empresa_id);
+CREATE INDEX idx_notas_empresa  ON notas (codigo_empresa, codigo_filial);
 CREATE INDEX idx_notas_emitente ON notas (cnpj_emitente);
 CREATE INDEX idx_notas_synced   ON notas (synced_at);
 CREATE INDEX idx_notas_imported ON notas (imported_at);

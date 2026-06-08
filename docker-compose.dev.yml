@@ -1,0 +1,22 @@
+# Postgres local para desenvolvimento/verificação do tracker.
+# Banco PRÓPRIO do tracker (separado do maestro). Em produção ele roda na
+# maestro-network do SRVRPS03 como serviço próprio.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   goose -dir migrations postgres "postgres://tracker:tracker@localhost:5433/xml_tracker?sslmode=disable" up
+#   TRACKER_STORE=postgres TRACKER_PG_DSN="postgres://tracker:tracker@localhost:5433/xml_tracker?sslmode=disable" \
+#     MAESTRO_JWT_SECRET=dev TRACKER_AGENT_SECRET=dev go run ./cmd/api
+services:
+  tracker-postgres:
+    image: postgres:15-alpine
+    container_name: tracker_postgres_dev
+    environment:
+      POSTGRES_USER: tracker
+      POSTGRES_PASSWORD: tracker
+      POSTGRES_DB: xml_tracker
+    ports:
+      - "5433:5432"   # 5433 no host para não colidir com o postgres do maestro
+    volumes:
+      - tracker_pg_dev:/var/lib/postgresql/data
+volumes:
+  tracker_pg_dev:
