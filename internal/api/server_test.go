@@ -12,6 +12,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/signing"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
 )
 
@@ -59,7 +60,7 @@ func TestIngestAndGetNota_EndToEnd(t *testing.T) {
 	// ingest with valid HMAC
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/observations", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-Signature", Sign(testAgent, body))
+	req.Header.Set("X-Agent-Signature", signing.Sign(testAgent, body))
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted {
@@ -73,7 +74,7 @@ func TestIngestAndGetNota_EndToEnd(t *testing.T) {
 
 	// idempotency: re-ingest same batch -> all rejected as duplicates
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/observations", bytes.NewReader(body))
-	req2.Header.Set("X-Agent-Signature", Sign(testAgent, body))
+	req2.Header.Set("X-Agent-Signature", signing.Sign(testAgent, body))
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, req2)
 	json.Unmarshal(w2.Body.Bytes(), &ing)

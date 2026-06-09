@@ -7,6 +7,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/nakagami/firebirdsql v0.9.19
+	go.etcd.io/bbolt v1.4.3
 )
 
 require (

@@ -2,13 +2,13 @@ package api
 
 import (
 	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/signing"
 )
 
 // claims mirrors the maestro JWT exactly so a single login works across both
@@ -54,7 +54,6 @@ func jwtAuth(secret string) gin.HandlerFunc {
 // raw request body with a shared secret; we recompute and compare in constant
 // time. This avoids exposing AMQP and keeps a single HTTPS port for the agent.
 func agentHMAC(secret string) gin.HandlerFunc {
-	key := []byte(secret)
 	return func(c *gin.Context) {
 		sig := c.GetHeader("X-Agent-Signature")
 		if sig == "" {
@@ -66,21 +65,11 @@ func agentHMAC(secret string) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "corpo ilegível"})
 			return
 		}
-		mac := hmac.New(sha256.New, key)
-		mac.Write(body)
-		want := hex.EncodeToString(mac.Sum(nil))
+		want := signing.Sign(secret, body)
 		if !hmac.Equal([]byte(sig), []byte(want)) {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "assinatura inválida"})
 			return
 		}
 		c.Next()
 	}
-}
-
-// Sign returns the hex HMAC-SHA256 of body with secret — used by the agent and
-// by tests to produce a valid X-Agent-Signature.
-func Sign(secret string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
 }

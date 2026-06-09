@@ -15,7 +15,9 @@ Rastreabilidade ponta-a-ponta de notas fiscais (XML) da RPS Contábil. Trata a *
 - `internal/store` — interface `Store` com impl em memória e **Postgres (pgx)**.
 - `cmd/poller` — fecha a etapa de **importação**: lê o Firebird do Athenas (read-only,
   chave-driven) e emite observações `imported`/`import_ignored`. `internal/firebird` é o leitor RO.
-- (próximo) `cmd/agent` — watch recursivo em SRVIMPORT + parse + POST assinado.
+- `cmd/agent` — roda no SRVIMPORT: varre as pastas (read-only), parseia XML novos
+  (`internal/xmlparse`), e envia observações assinadas (`internal/ingest`, HMAC + retry + spool).
+  Estado em bbolt; backfill opcional. Etapas **chegada** e **sincronização**.
 
 ## Rodar local
 
@@ -43,6 +45,21 @@ TRACKER_FB_DSN='SYSDBA:masterkey@192.168.10.160:3050/e:\Athenas\rps.fdb?charset=
 TRACKER_STORE=postgres TRACKER_PG_DSN="$DSN" TRACKER_POLL_INTERVAL=30s go run ./cmd/poller
 ```
 
+### Agente (SRVIMPORT, Windows)
+```bash
+# cross-compilar o .exe para o SRVIMPORT:
+GOOS=windows GOARCH=amd64 go build -o agent.exe ./cmd/agent
+```
+No SRVIMPORT (PowerShell), com as variáveis abaixo. 1º run com `BACKFILL=false` apenas semeia o
+backlog (não emite); depois emite só o que chega.
+```powershell
+$env:TRACKER_API_URL="http://192.168.10.46:8090"
+$env:TRACKER_AGENT_SECRET="<segredo HMAC>"
+$env:TRACKER_AGENT_ARRIVAL_ROOT="F:\Xml_ASincronizar"
+$env:TRACKER_AGENT_SYNC_ROOT="F:\XML SINCRONIZADO"
+.\agent.exe
+```
+
 ## Testes
 ```bash
 go test ./...                                   # unitários + httptest (sem banco)
@@ -61,3 +78,9 @@ TRACKER_TEST_FB_DSN="..." TRACKER_TEST_FB_CHAVE="<chave importada>" go test ./in
 | `TRACKER_API_PORT` | porta da API (default `8090`) |
 | `TRACKER_FB_DSN` | DSN do Firebird do Athenas (read-only) — usado pelo `cmd/poller` |
 | `TRACKER_POLL_INTERVAL` | intervalo do poller (default `30s`) |
+| `TRACKER_API_URL` | URL da API (agente) |
+| `TRACKER_AGENT_ARRIVAL_ROOT` / `_SYNC_ROOT` | pastas observadas no SRVIMPORT |
+| `TRACKER_AGENT_NAME` | nome do agente (default `SRVIMPORT`) → `source` da observação |
+| `TRACKER_AGENT_STATE` / `_SPOOL` | arquivo de estado bbolt / pasta de spool |
+| `TRACKER_AGENT_SCAN_INTERVAL` | intervalo de varredura (default `60s`) |
+| `TRACKER_AGENT_BACKFILL` | `true` processa o backlog; `false` (default) só semeia |
