@@ -1,7 +1,8 @@
-// Package xmlparse extracts the chave de acesso and document type from a fiscal
+// Package xmlparse extracts the chave de acesso and key fields from a fiscal
 // XML file, READ-ONLY. The filename does NOT contain the chave (Fase 0), so we
-// must read the content. It streams the XML and stops as soon as it has the
-// chave + type, and never loads the whole DOM.
+// must read the content. It streams the XML with a small state machine and also
+// captures emitente/destinatário (CNPJ + nome), emission date and total value —
+// used to identify the empresa/parties and to power the dashboard filters.
 package xmlparse
 
 import (
@@ -19,9 +20,16 @@ type Result struct {
 	ChaveVia string        // "infNFe@Id" | "chNFe" | "chCTe" | ""
 	DocType  model.DocType // NFE/NFCE/CTE/EVENTO/UNKNOWN
 	RootElem string
+
+	CnpjEmitente     string
+	NomeEmitente     string
+	CnpjDestinatario string
+	NomeDestinatario string
+	DataEmissao      string // yyyy-mm-dd
+	ValorTotal       string // raw, ex.: "1234.56"
 }
 
-// ParseFile opens path read-only and extracts the chave/type.
+// ParseFile opens path read-only and extracts the fields.
 func ParseFile(path string) (Result, error) {
 	f, err := os.Open(path) // read-only; never modifies the file
 	if err != nil {
@@ -39,7 +47,8 @@ func Parse(r io.Reader) (Result, error) {
 	dec.CharsetReader = func(_ string, in io.Reader) (io.Reader, error) { return in, nil }
 
 	var mod string
-	var inChNFe, inChCTe bool
+	var inEmit, inDest bool
+
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -53,10 +62,11 @@ func Parse(r io.Reader) (Result, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
+			local := t.Name.Local
 			if res.RootElem == "" {
-				res.RootElem = t.Name.Local
+				res.RootElem = local
 			}
-			switch t.Name.Local {
+			switch local {
 			case "infNFe", "infNFCe":
 				for _, a := range t.Attr {
 					if a.Name.Local == "Id" && res.Chave == "" {
@@ -66,49 +76,80 @@ func Parse(r io.Reader) (Result, error) {
 					}
 				}
 			case "mod":
-				if v, ok := charData(dec); ok {
-					mod = strings.TrimSpace(v)
-				}
+				mod = strings.TrimSpace(text(dec))
 			case "chNFe":
-				inChNFe = true
-			case "chCTe":
-				inChCTe = true
-			}
-		case xml.CharData:
-			if inChNFe && res.Chave == "" {
-				if k := normalizeKey(string(t)); k != "" {
-					res.Chave, res.ChaveVia = k, "chNFe"
+				if res.Chave == "" {
+					if k := normalizeKey(text(dec)); k != "" {
+						res.Chave, res.ChaveVia = k, "chNFe"
+					}
 				}
-			} else if inChCTe && res.Chave == "" {
-				if k := normalizeKey(string(t)); k != "" {
-					res.Chave, res.ChaveVia = k, "chCTe"
+			case "chCTe":
+				if res.Chave == "" {
+					if k := normalizeKey(text(dec)); k != "" {
+						res.Chave, res.ChaveVia = k, "chCTe"
+					}
+				}
+			case "emit":
+				inEmit = true
+			case "dest":
+				inDest = true
+			case "CNPJ", "CPF":
+				v := strings.TrimSpace(text(dec))
+				if inEmit && res.CnpjEmitente == "" {
+					res.CnpjEmitente = v
+				} else if inDest && res.CnpjDestinatario == "" {
+					res.CnpjDestinatario = v
+				}
+			case "xNome":
+				v := strings.TrimSpace(text(dec))
+				if inEmit && res.NomeEmitente == "" {
+					res.NomeEmitente = v
+				} else if inDest && res.NomeDestinatario == "" {
+					res.NomeDestinatario = v
+				}
+			case "dhEmi", "dEmi":
+				if res.DataEmissao == "" {
+					if d := dateOnly(text(dec)); d != "" {
+						res.DataEmissao = d
+					}
+				}
+			case "vNF":
+				if res.ValorTotal == "" {
+					res.ValorTotal = strings.TrimSpace(text(dec))
 				}
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
-			case "chNFe":
-				inChNFe = false
-			case "chCTe":
-				inChCTe = false
+			case "emit":
+				inEmit = false
+			case "dest":
+				inDest = false
 			}
-		}
-		if res.Chave != "" && res.RootElem != "" && mod != "" {
-			break
 		}
 	}
 	res.DocType = classify(res.RootElem, res.ChaveVia, mod)
 	return res, nil
 }
 
-func charData(dec *xml.Decoder) (string, bool) {
+// text reads the immediate char data of the element just started.
+func text(dec *xml.Decoder) string {
 	tok, err := dec.Token()
 	if err != nil {
-		return "", false
+		return ""
 	}
 	if cd, ok := tok.(xml.CharData); ok {
-		return string(cd), true
+		return string(cd)
 	}
-	return "", false
+	return ""
+}
+
+// dateOnly returns the yyyy-mm-dd prefix of a date/datetime string.
+func dateOnly(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return ""
 }
 
 // normalizeKey strips an "NFe"/"CTe" prefix and non-digits, returns 44 digits or "".
@@ -141,7 +182,6 @@ func classify(root, via, mod string) model.DocType {
 	case "cteProc", "CTe":
 		return model.DocCTe
 	}
-	// fallback by how the chave was found
 	switch via {
 	case "chCTe":
 		return model.DocCTe

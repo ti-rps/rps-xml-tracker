@@ -68,14 +68,14 @@ func (p *Poller) PollOnce(ctx context.Context) (Result, error) {
 		}
 		switch {
 		case st.Importado:
-			obs = append(obs, importObs(c, model.EventImported, now, nil))
+			obs = append(obs, importObs(c, model.EventImported, now, nil, st))
 			res.Imported++
 		case st.ImportIgnorada:
 			payload := map[string]any{}
 			if st.Motivo != "" {
 				payload["motivo"] = st.Motivo
 			}
-			obs = append(obs, importObs(c, model.EventImportIgnored, now, payload))
+			obs = append(obs, importObs(c, model.EventImportIgnored, now, payload, st))
 			res.Ignored++
 		}
 	}
@@ -104,7 +104,7 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration, onResult func(
 	}
 }
 
-func importObs(chave, event string, now time.Time, payload map[string]any) model.Observation {
+func importObs(chave, event string, now time.Time, payload map[string]any, st firebird.ImportState) model.Observation {
 	return model.Observation{
 		ChaveAcesso: chave,
 		Stage:       model.StageImport,
@@ -113,5 +113,14 @@ func importObs(chave, event string, now time.Time, payload map[string]any) model
 		IngestedAt:  now,
 		Source:      "poller:firebird",
 		Payload:     payload,
+		// enriquece com os dados da linha do Athenas (código do cliente + partes)
+		CodigoEmpresa:    st.CodigoEmpresa,
+		CodigoFilial:     st.CodigoFilial,
+		CnpjEmitente:     st.CnpjEmitente,
+		NomeEmitente:     st.NomeEmitente,
+		CnpjDestinatario: st.CnpjDestinatario,
+		NomeDestinatario: st.NomeDestinatario,
+		DataEmissao:      st.DataEmissao,
+		ValorTotal:       st.ValorTotal,
 	}
 }

@@ -243,18 +243,37 @@ func (a *Agent) parseToObservation(root Root, path string, info fs.FileInfo) (mo
 	}
 	emp, fil := empresaFromPath(root.Path, path)
 	obs := model.Observation{
-		ChaveAcesso:   pr.Chave,
-		Stage:         root.Stage,
-		EventType:     root.Event,
-		ObservedAt:    info.ModTime(),
-		Source:        "agent:" + a.cfg.Name,
-		DocType:       pr.DocType,
-		FilePath:      path,
-		FileHash:      hash,
-		CodigoEmpresa: emp,
-		CodigoFilial:  fil,
+		ChaveAcesso:      pr.Chave,
+		Stage:            root.Stage,
+		EventType:        root.Event,
+		ObservedAt:       info.ModTime(),
+		Source:           "agent:" + a.cfg.Name,
+		DocType:          pr.DocType,
+		FilePath:         path,
+		FileHash:         hash,
+		CodigoEmpresa:    emp,
+		CodigoFilial:     fil,
+		CnpjEmitente:     pr.CnpjEmitente,
+		NomeEmitente:     pr.NomeEmitente,
+		CnpjDestinatario: pr.CnpjDestinatario,
+		NomeDestinatario: pr.NomeDestinatario,
+		DataEmissao:      pr.DataEmissao,
+		ValorTotal:       parseValor(pr.ValorTotal),
 	}
 	return obs, pr.Chave, true
+}
+
+// parseValor converte o vNF do XML ("1234.56") em *float64; nil se vazio/inválido.
+func parseValor(s string) *float64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
 }
 
 // empresaFromPath reads the top folder under root: "1203-1 NOME" -> (1203, 1).

@@ -7,6 +7,34 @@ import (
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 )
 
+func TestParse_ExtractsParties(t *testing.T) {
+	xml := `<nfeProc><NFe><infNFe Id="NFe35250712345678000190550010000001231000001234">
+	  <ide><mod>55</mod><dhEmi>2026-06-08T10:30:00-03:00</dhEmi></ide>
+	  <emit><CNPJ>12345678000190</CNPJ><xNome>FORNECEDOR EXEMPLO LTDA</xNome></emit>
+	  <dest><CNPJ>99999999000191</CNPJ><xNome>CLIENTE RPS LTDA</xNome></dest>
+	  <total><ICMSTot><vNF>1234.56</vNF></ICMSTot></total>
+	</infNFe></NFe></nfeProc>`
+	r, err := Parse(strings.NewReader(xml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.CnpjEmitente != "12345678000190" || r.NomeEmitente != "FORNECEDOR EXEMPLO LTDA" {
+		t.Errorf("emitente: %q / %q", r.CnpjEmitente, r.NomeEmitente)
+	}
+	if r.CnpjDestinatario != "99999999000191" || r.NomeDestinatario != "CLIENTE RPS LTDA" {
+		t.Errorf("destinatário: %q / %q", r.CnpjDestinatario, r.NomeDestinatario)
+	}
+	if r.DataEmissao != "2026-06-08" {
+		t.Errorf("data_emissao = %q want 2026-06-08", r.DataEmissao)
+	}
+	if r.ValorTotal != "1234.56" {
+		t.Errorf("valor = %q want 1234.56", r.ValorTotal)
+	}
+	if r.Chave != "35250712345678000190550010000001231000001234" {
+		t.Errorf("chave = %q", r.Chave)
+	}
+}
+
 func TestParse(t *testing.T) {
 	cases := []struct {
 		name    string

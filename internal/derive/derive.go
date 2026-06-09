@@ -42,6 +42,15 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 		if o.CodigoFilial != nil {
 			n.CodigoFilial = o.CodigoFilial
 		}
+		// metadados: primeira observação não-vazia vence (são imutáveis por nota)
+		setIfEmpty(&n.CnpjEmitente, o.CnpjEmitente)
+		setIfEmpty(&n.NomeEmitente, o.NomeEmitente)
+		setIfEmpty(&n.CnpjDestinatario, o.CnpjDestinatario)
+		setIfEmpty(&n.NomeDestinatario, o.NomeDestinatario)
+		setIfEmpty(&n.DataEmissao, o.DataEmissao)
+		if n.ValorTotal == nil && o.ValorTotal != nil {
+			n.ValorTotal = o.ValorTotal
+		}
 		switch o.Stage {
 		case model.StageArrival:
 			setIfEarlier(&n.ArrivedAt, o.ObservedAt)
@@ -79,6 +88,12 @@ func status(n model.Nota) model.NotaStatus {
 		return model.StatusArrived
 	default:
 		return model.StatusPendingImport
+	}
+}
+
+func setIfEmpty(dst *string, v string) {
+	if *dst == "" && v != "" {
+		*dst = v
 	}
 }
 
