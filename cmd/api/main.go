@@ -1,0 +1,93 @@
+// Command api runs the rps-xml-tracker HTTP API.
+//
+// Walking-skeleton slice: it can run with an in-memory store (STORE=memory) so
+// the ingest->derive->get flow is exercisable without Postgres. The Postgres
+// (pgx) store lands behind the same store.Store interface in the next slice.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/api"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/migrate"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
+)
+
+func main() {
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+
+	var st store.Store
+	switch getenv("TRACKER_STORE", "memory") {
+	case "memory":
+		st = store.NewMemory()
+		log.Println("store: in-memory (NÃO persistente — só dev/smoke)")
+	case "postgres":
+		dsn := os.Getenv("TRACKER_PG_DSN")
+		if dsn == "" {
+			log.Fatal("store: TRACKER_PG_DSN é obrigatório com TRACKER_STORE=postgres")
+		}
+		if err := migrate.Up(dsn); err != nil {
+			log.Fatalf("migrações: %v", err)
+		}
+		log.Println("migrações: aplicadas")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		pg, err := store.NewPostgres(ctx, dsn)
+		if err != nil {
+			log.Fatalf("store: postgres: %v", err)
+		}
+		defer pg.Close()
+		st = pg
+		log.Println("store: postgres")
+	default:
+		log.Fatalf("store: valor inválido para TRACKER_STORE")
+	}
+
+	srv := api.New(st, cfg)
+	addr := ":" + getenv("TRACKER_API_PORT", "8090")
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	log.Printf("tracker-api ouvindo em %s", addr)
+	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("listen: %v", err)
+	}
+}
+
+// loadConfig reads secrets from env and FAILS CLOSED: an empty JWT secret is a
+// boot error (we do NOT replicate maestro's dev bypass that skips auth).
+func loadConfig() (api.Config, error) {
+	cfg := api.Config{
+		JWTSecret:   os.Getenv("MAESTRO_JWT_SECRET"),
+		AgentSecret: os.Getenv("TRACKER_AGENT_SECRET"),
+	}
+	if o := os.Getenv("TRACKER_CORS_ORIGINS"); o != "" {
+		cfg.CORSOrigins = strings.Split(o, ",")
+	}
+	if cfg.JWTSecret == "" {
+		return cfg, fmt.Errorf("MAESTRO_JWT_SECRET é obrigatório (fail-closed)")
+	}
+	if cfg.AgentSecret == "" {
+		return cfg, fmt.Errorf("TRACKER_AGENT_SECRET é obrigatório (autentica o agente)")
+	}
+	return cfg, nil
+}
+
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
