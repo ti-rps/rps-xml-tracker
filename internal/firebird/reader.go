@@ -20,7 +20,8 @@ type Reader struct {
 }
 
 // ImportState is the aggregated import status of one chave. A chave may have
-// more than one row (nota + events); we OR the flags so "imported" wins.
+// more than one row (nota + events); we OR the flags so "imported" wins and take
+// the first non-empty metadata.
 type ImportState struct {
 	Chave          string
 	Found          bool
@@ -29,6 +30,15 @@ type ImportState struct {
 	Motivo         string
 	Situacao       *int
 	TipoDocumento  string
+	// metadados (enriquecem a nota): código do cliente no Athenas + partes
+	CodigoEmpresa    *int
+	CodigoFilial     *int
+	CnpjEmitente     string
+	NomeEmitente     string
+	CnpjDestinatario string
+	NomeDestinatario string
+	DataEmissao      string // yyyy-mm-dd
+	ValorTotal       *float64
 }
 
 // NewReader opens the pool. The DSN must enable Legacy_Auth and disable wire
@@ -75,7 +85,9 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, out map[strin
 	for i, c := range chaves {
 		args[i] = c
 	}
-	q := `SELECT CHAVEACESSO, IMPORTADO, IMPORTACAOIGNORADA, MOTIVOIGNORADOIMPORTACAO, SITUACAO, TIPODOCUMENTO
+	q := `SELECT CHAVEACESSO, IMPORTADO, IMPORTACAOIGNORADA, MOTIVOIGNORADOIMPORTACAO, SITUACAO, TIPODOCUMENTO,
+	             CODIGOEMPRESA, CODIGOFILIAL, CNPJEMITENTE, CNPJDESTINATARIO, EMITENTE, DESTINATARIO,
+	             DATAEMISSAO, VALORTOTAL
 	      FROM TABLISTACHAVEACESSO WHERE CHAVEACESSO IN (` + placeholders + `)`
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -85,14 +97,17 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, out map[strin
 
 	for rows.Next() {
 		var (
-			chave  string
-			imp    sql.NullInt64
-			ign    sql.NullInt64
-			motivo sql.NullString
-			sit    sql.NullInt64
-			tipo   sql.NullString
+			chave          string
+			imp, ign, sit  sql.NullInt64
+			motivo, tipo   sql.NullString
+			codEmp, codFil sql.NullInt64
+			cnpjE, cnpjD   sql.NullString
+			nomeE, nomeD   sql.NullString
+			emissao        sql.NullTime
+			valor          sql.NullFloat64
 		)
-		if err := rows.Scan(&chave, &imp, &ign, &motivo, &sit, &tipo); err != nil {
+		if err := rows.Scan(&chave, &imp, &ign, &motivo, &sit, &tipo,
+			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor); err != nil {
 			return err
 		}
 		chave = strings.TrimSpace(chave)
@@ -114,6 +129,33 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, out map[strin
 		}
 		if tipo.Valid && st.TipoDocumento == "" {
 			st.TipoDocumento = strings.TrimSpace(tipo.String)
+		}
+		if codEmp.Valid && st.CodigoEmpresa == nil {
+			v := int(codEmp.Int64)
+			st.CodigoEmpresa = &v
+		}
+		if codFil.Valid && st.CodigoFilial == nil {
+			v := int(codFil.Int64)
+			st.CodigoFilial = &v
+		}
+		if cnpjE.Valid && st.CnpjEmitente == "" {
+			st.CnpjEmitente = strings.TrimSpace(cnpjE.String)
+		}
+		if cnpjD.Valid && st.CnpjDestinatario == "" {
+			st.CnpjDestinatario = strings.TrimSpace(cnpjD.String)
+		}
+		if nomeE.Valid && st.NomeEmitente == "" {
+			st.NomeEmitente = strings.TrimSpace(nomeE.String)
+		}
+		if nomeD.Valid && st.NomeDestinatario == "" {
+			st.NomeDestinatario = strings.TrimSpace(nomeD.String)
+		}
+		if emissao.Valid && st.DataEmissao == "" {
+			st.DataEmissao = emissao.Time.Format("2006-01-02")
+		}
+		if valor.Valid && st.ValorTotal == nil {
+			v := valor.Float64
+			st.ValorTotal = &v
 		}
 		out[chave] = st
 	}
