@@ -80,6 +80,41 @@ func (s *Server) routes() {
 	read := v1.Group("", jwtAuth(s.cfg.JWTSecret))
 	read.GET("/notas", s.handleListNotas)
 	read.GET("/notas/:chave", s.handleGetNota)
+	read.GET("/metrics/overview", s.handleOverview)
+	read.GET("/empresas", s.handleEmpresas)
+	read.GET("/nfse/import", s.handleNfseImport)
+}
+
+func (s *Server) handleOverview(c *gin.Context) {
+	ov, err := s.st.Overview(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular overview"})
+		return
+	}
+	c.JSON(http.StatusOK, ov)
+}
+
+func (s *Server) handleEmpresas(c *gin.Context) {
+	items, err := s.st.Empresas(c.Request.Context(), c.Query("pendentes") == "true")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao listar empresas"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+}
+
+func (s *Server) handleNfseImport(c *gin.Context) {
+	f := store.NfseFilter{
+		Status: model.NotaStatus(c.Query("status")),
+		Limit:  atoiDefault(c.Query("limit"), 50),
+		Offset: atoiDefault(c.Query("offset"), 0),
+	}
+	items, total, err := s.st.ListNfseImport(c.Request.Context(), f)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao listar nfse"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "limit": f.Limit, "offset": f.Offset})
 }
 
 type ingestRequest struct {

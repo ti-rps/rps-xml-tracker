@@ -24,6 +24,20 @@ services:
     networks:
       - tracker-network
 
+  # one-shot: aplica as migrações e sai. api/poller dependem dele concluir.
+  tracker-migrate:
+    build: .
+    container_name: tracker_migrate
+    command: ["tracker-migrate"]
+    environment:
+      TRACKER_PG_DSN: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@tracker-postgres:5432/${POSTGRES_DB}?sslmode=disable"
+    depends_on:
+      tracker-postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - tracker-network
+
   tracker-api:
     build: .
     container_name: tracker_api
@@ -37,8 +51,8 @@ services:
     ports:
       - "8090:8090"   # SRVIMPORT (agente) e o navegador (maestro_web) chamam aqui
     depends_on:
-      tracker-postgres:
-        condition: service_healthy
+      tracker-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks:
       - tracker-network
@@ -53,8 +67,8 @@ services:
       TRACKER_STORE: postgres
       TRACKER_PG_DSN: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@tracker-postgres:5432/${POSTGRES_DB}?sslmode=disable"
     depends_on:
-      tracker-postgres:
-        condition: service_healthy
+      tracker-migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     networks:
       - tracker-network
