@@ -1,0 +1,4 @@
+# compiled phase-0 tool binaries (Windows .exe; Linux dev binaries are built to /tmp)
+*.exe
+# local investigation outputs
+*.json
