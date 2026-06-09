@@ -1,0 +1,12 @@
+.git
+.github
+phase0
+design
+docker-compose*.yml
+*.md
+.env
+.env.*
+!.env.example
+agent-state.db
+agent-spool
+*.exe

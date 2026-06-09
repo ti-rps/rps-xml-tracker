@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -18,8 +19,9 @@ import (
 
 // Config holds the secrets/wiring the server needs.
 type Config struct {
-	JWTSecret   string // MAESTRO_JWT_SECRET (validated non-empty at boot)
-	AgentSecret string // shared HMAC secret with the SRVIMPORT agent
+	JWTSecret   string   // MAESTRO_JWT_SECRET (validated non-empty at boot)
+	AgentSecret string   // shared HMAC secret with the SRVIMPORT agent
+	CORSOrigins []string // allowed browser origins for the maestro_web UI ("" = none)
 }
 
 // Server is the HTTP server.
@@ -32,8 +34,35 @@ type Server struct {
 func New(st store.Store, cfg Config) *Server {
 	s := &Server{st: st, cfg: cfg, r: gin.New()}
 	s.r.Use(gin.Recovery())
+	if len(cfg.CORSOrigins) > 0 {
+		s.r.Use(cors(cfg.CORSOrigins))
+	}
 	s.routes()
 	return s
+}
+
+// cors mirrors the maestro CORS conventions so the maestro_web UI can call this
+// API cross-origin (browser). Server-to-server callers (the agent) don't need it.
+func cors(allowed []string) gin.HandlerFunc {
+	set := make(map[string]bool, len(allowed))
+	for _, o := range allowed {
+		set[strings.TrimSpace(o)] = true
+	}
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin != "" && set[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Vary", "Origin")
+			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
+			c.Header("Access-Control-Max-Age", "43200")
+		}
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
 }
 
 // Handler exposes the router (for httptest and for http.Server).

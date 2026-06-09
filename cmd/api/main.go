@@ -12,9 +12,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/api"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/migrate"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
 )
 
@@ -34,6 +36,10 @@ func main() {
 		if dsn == "" {
 			log.Fatal("store: TRACKER_PG_DSN é obrigatório com TRACKER_STORE=postgres")
 		}
+		if err := migrate.Up(dsn); err != nil {
+			log.Fatalf("migrações: %v", err)
+		}
+		log.Println("migrações: aplicadas")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		pg, err := store.NewPostgres(ctx, dsn)
@@ -66,6 +72,9 @@ func loadConfig() (api.Config, error) {
 	cfg := api.Config{
 		JWTSecret:   os.Getenv("MAESTRO_JWT_SECRET"),
 		AgentSecret: os.Getenv("TRACKER_AGENT_SECRET"),
+	}
+	if o := os.Getenv("TRACKER_CORS_ORIGINS"); o != "" {
+		cfg.CORSOrigins = strings.Split(o, ",")
 	}
 	if cfg.JWTSecret == "" {
 		return cfg, fmt.Errorf("MAESTRO_JWT_SECRET é obrigatório (fail-closed)")

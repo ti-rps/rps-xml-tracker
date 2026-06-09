@@ -1,0 +1,68 @@
+# Deploy de produção do rps-xml-tracker (SRVRPS03).
+# Espelha o padrão do bot-xml-gms: build no servidor via "docker compose up --build -d"
+# (a workflow .github/workflows/deploy.yml faz isso no runner self-hosted).
+#
+# Rede PRÓPRIA + porta publicada: o tracker não fala com nenhum container do maestro
+# (sem RabbitMQ). O navegador (maestro_web) e o agente (SRVIMPORT) chamam a API pela
+# porta publicada. O SSO funciona porque MAESTRO_JWT_SECRET é o MESMO do maestro.
+services:
+  tracker-postgres:
+    image: postgres:15-alpine
+    container_name: tracker_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - tracker_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - tracker-network
+
+  tracker-api:
+    build: .
+    container_name: tracker_api
+    command: ["tracker-api"]
+    env_file:
+      - .env
+    environment:
+      TRACKER_STORE: postgres
+      TRACKER_PG_DSN: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@tracker-postgres:5432/${POSTGRES_DB}?sslmode=disable"
+      TRACKER_API_PORT: "8090"
+    ports:
+      - "8090:8090"   # SRVIMPORT (agente) e o navegador (maestro_web) chamam aqui
+    depends_on:
+      tracker-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tracker-network
+
+  tracker-poller:
+    build: .
+    container_name: tracker_poller
+    command: ["tracker-poller"]
+    env_file:
+      - .env
+    environment:
+      TRACKER_STORE: postgres
+      TRACKER_PG_DSN: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@tracker-postgres:5432/${POSTGRES_DB}?sslmode=disable"
+    depends_on:
+      tracker-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - tracker-network
+
+networks:
+  tracker-network:
+    name: tracker-network
+    driver: bridge
+
+volumes:
+  tracker_pg_data:

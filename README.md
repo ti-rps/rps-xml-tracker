@@ -84,3 +84,22 @@ TRACKER_TEST_FB_DSN="..." TRACKER_TEST_FB_CHAVE="<chave importada>" go test ./in
 | `TRACKER_AGENT_STATE` / `_SPOOL` | arquivo de estado bbolt / pasta de spool |
 | `TRACKER_AGENT_SCAN_INTERVAL` | intervalo de varredura (default `60s`) |
 | `TRACKER_AGENT_BACKFILL` | `true` processa o backlog; `false` (default) só semeia |
+| `TRACKER_CORS_ORIGINS` | origens permitidas para a UI (maestro_web), separadas por vírgula |
+
+## Deploy (produção — SRVRPS03)
+
+Mesmo padrão do `bot-xml-gms`: o repositório é clonado no SRVRPS03 e o build roda no servidor.
+
+1. No SRVRPS03, clonar o repo e criar o `.env` a partir do `.env.example` (preencher o
+   **mesmo `MAESTRO_JWT_SECRET` do maestro**, `TRACKER_AGENT_SECRET`, senha do Postgres e
+   `TRACKER_FB_DSN`).
+2. Subir: `docker compose up --build -d` (sobe `tracker-postgres`, `tracker-api` na porta 8090,
+   `tracker-poller`). As migrações são aplicadas no boot da API (goose embarcado).
+3. CI opcional: `.github/workflows/deploy.yml` (runner self-hosted) faz `git pull` +
+   `docker compose up --build -d` a cada push na `main` — exige o secret `PROD_DEPLOY_PATH`.
+
+O **agente** roda no **SRVIMPORT** (Windows), fora deste compose: cross-compilar o `.exe` e apontar
+`TRACKER_API_URL=http://192.168.10.46:8090` com o mesmo `TRACKER_AGENT_SECRET`.
+
+Rede: o tracker usa rede própria + porta publicada (não depende da `maestro-network`); o SSO
+funciona por compartilhar o `MAESTRO_JWT_SECRET`.
