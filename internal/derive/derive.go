@@ -43,6 +43,7 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 			n.CodigoFilial = o.CodigoFilial
 		}
 		// metadados: primeira observação não-vazia vence (são imutáveis por nota)
+		setIfEmpty(&n.NomeEmpresa, o.NomeEmpresa)
 		setIfEmpty(&n.CnpjEmitente, o.CnpjEmitente)
 		setIfEmpty(&n.NomeEmitente, o.NomeEmitente)
 		setIfEmpty(&n.CnpjDestinatario, o.CnpjDestinatario)

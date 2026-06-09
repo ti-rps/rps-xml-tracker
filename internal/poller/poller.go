@@ -116,6 +116,7 @@ func importObs(chave, event string, now time.Time, payload map[string]any, st fi
 		// enriquece com os dados da linha do Athenas (código do cliente + partes)
 		CodigoEmpresa:    st.CodigoEmpresa,
 		CodigoFilial:     st.CodigoFilial,
+		NomeEmpresa:      st.NomeEmpresa,
 		CnpjEmitente:     st.CnpjEmitente,
 		NomeEmitente:     st.NomeEmitente,
 		CnpjDestinatario: st.CnpjDestinatario,

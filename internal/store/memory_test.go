@@ -18,6 +18,35 @@ func obsFor(chave string, stage model.Stage, event string, at time.Time, emp int
 	}
 }
 
+func TestListNotas_Filters(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	at := time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC)
+	mk := func(chave, emp, cnpjE, emissao string) model.Observation {
+		return model.Observation{
+			ChaveAcesso: chave, Stage: model.StageArrival, EventType: model.EventFileSeen,
+			ObservedAt: at, DocType: model.DocNFe, Source: "t",
+			NomeEmpresa: emp, CnpjEmitente: cnpjE, DataEmissao: emissao,
+		}
+	}
+	_, _, _ = m.AppendObservations(ctx, []model.Observation{
+		mk("A", "PJA INDUSTRIA", "15484297000185", "2026-06-05"),
+		mk("B", "OUTRA EMPRESA", "99999999000191", "2026-05-20"),
+	})
+
+	check := func(name string, f NotaFilter, wantTotal int) {
+		_, total, err := m.ListNotas(ctx, f)
+		if err != nil || total != wantTotal {
+			t.Errorf("%s: total=%d err=%v, want %d", name, total, err, wantTotal)
+		}
+	}
+	check("empresa", NotaFilter{EmpresaQuery: "pja"}, 1)          // case-insensitive
+	check("cnpj", NotaFilter{Cnpj: "15484297000185"}, 1)
+	check("emissao range", NotaFilter{DateField: "emissao", From: "2026-06-01", To: "2026-06-30"}, 1)
+	check("emissao range ambas", NotaFilter{DateField: "emissao", From: "2026-05-01"}, 2)
+	check("sem filtro", NotaFilter{}, 2)
+}
+
 func TestOverviewAndEmpresas(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()

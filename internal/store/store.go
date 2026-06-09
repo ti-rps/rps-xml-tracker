@@ -50,9 +50,31 @@ type NotaFilter struct {
 	Status        model.NotaStatus
 	DocType       model.DocType
 	CodigoEmpresa *int
+	EmpresaQuery  string // LIKE em empresa_nome
+	Cnpj          string // LIKE em cnpj_emitente OU cnpj_destinatario
 	ChaveQuery    string // partial/full chave
-	Limit         int
-	Offset        int
+	// faixa de data sobre o campo escolhido: emissao|arrived|synced|imported
+	DateField string
+	From      string // yyyy-mm-dd (inclusive)
+	To        string // yyyy-mm-dd (inclusive)
+	Limit     int
+	Offset    int
+}
+
+// dateColumn maps a DateField to the notas column (empty = unsupported/ignored).
+func dateColumn(field string) string {
+	switch field {
+	case "emissao":
+		return "data_emissao"
+	case "arrived":
+		return "arrived_at"
+	case "synced":
+		return "synced_at"
+	case "imported":
+		return "imported_at"
+	default:
+		return ""
+	}
 }
 
 // DedupKey is the idempotency key for an observation: same source+stage+event+

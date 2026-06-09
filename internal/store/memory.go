@@ -247,10 +247,54 @@ func matches(n model.Nota, f NotaFilter) bool {
 	if f.CodigoEmpresa != nil && (n.CodigoEmpresa == nil || *n.CodigoEmpresa != *f.CodigoEmpresa) {
 		return false
 	}
+	if f.EmpresaQuery != "" && !containsFold(n.NomeEmpresa, f.EmpresaQuery) {
+		return false
+	}
+	if f.Cnpj != "" && !strings.Contains(n.CnpjEmitente, f.Cnpj) && !strings.Contains(n.CnpjDestinatario, f.Cnpj) {
+		return false
+	}
 	if f.ChaveQuery != "" && !strings.Contains(n.ChaveAcesso, f.ChaveQuery) {
 		return false
 	}
+	if col := dateColumn(f.DateField); col != "" && (f.From != "" || f.To != "") {
+		d := notaDate(n, f.DateField)
+		if d == "" {
+			return false
+		}
+		if f.From != "" && d < f.From {
+			return false
+		}
+		if f.To != "" && d > f.To {
+			return false
+		}
+	}
 	return true
+}
+
+func containsFold(s, sub string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+}
+
+// notaDate returns the yyyy-mm-dd string of the chosen date field, or "".
+func notaDate(n model.Nota, field string) string {
+	switch field {
+	case "emissao":
+		return n.DataEmissao
+	case "arrived":
+		return tsDate(n.ArrivedAt)
+	case "synced":
+		return tsDate(n.SyncedAt)
+	case "imported":
+		return tsDate(n.ImportedAt)
+	}
+	return ""
+}
+
+func tsDate(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format("2006-01-02")
 }
 
 func clamp(v, lo, hi int) int {

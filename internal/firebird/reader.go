@@ -33,6 +33,7 @@ type ImportState struct {
 	// metadados (enriquecem a nota): código do cliente no Athenas + partes
 	CodigoEmpresa    *int
 	CodigoFilial     *int
+	NomeEmpresa      string
 	CnpjEmitente     string
 	NomeEmitente     string
 	CnpjDestinatario string
@@ -85,10 +86,12 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, out map[strin
 	for i, c := range chaves {
 		args[i] = c
 	}
-	q := `SELECT CHAVEACESSO, IMPORTADO, IMPORTACAOIGNORADA, MOTIVOIGNORADOIMPORTACAO, SITUACAO, TIPODOCUMENTO,
-	             CODIGOEMPRESA, CODIGOFILIAL, CNPJEMITENTE, CNPJDESTINATARIO, EMITENTE, DESTINATARIO,
-	             DATAEMISSAO, VALORTOTAL
-	      FROM TABLISTACHAVEACESSO WHERE CHAVEACESSO IN (` + placeholders + `)`
+	q := `SELECT t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
+	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME
+	      FROM TABLISTACHAVEACESSO t
+	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
+	      WHERE t.CHAVEACESSO IN (` + placeholders + `)`
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
@@ -105,9 +108,10 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, out map[strin
 			nomeE, nomeD   sql.NullString
 			emissao        sql.NullTime
 			valor          sql.NullFloat64
+			nomeEmpresa    sql.NullString
 		)
 		if err := rows.Scan(&chave, &imp, &ign, &motivo, &sit, &tipo,
-			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor); err != nil {
+			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor, &nomeEmpresa); err != nil {
 			return err
 		}
 		chave = strings.TrimSpace(chave)
@@ -156,6 +160,9 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, out map[strin
 		if valor.Valid && st.ValorTotal == nil {
 			v := valor.Float64
 			st.ValorTotal = &v
+		}
+		if nomeEmpresa.Valid && st.NomeEmpresa == "" {
+			st.NomeEmpresa = strings.TrimSpace(nomeEmpresa.String)
 		}
 		out[chave] = st
 	}

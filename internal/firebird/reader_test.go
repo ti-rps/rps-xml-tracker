@@ -32,8 +32,9 @@ func TestReaderLookup(t *testing.T) {
 	}
 	for _, c := range chaves {
 		st, ok := got[c]
-		t.Logf("chave=%s found=%v importado=%v ignorada=%v motivo=%q situacao=%v tipo=%s",
-			c, ok, st.Importado, st.ImportIgnorada, st.Motivo, st.Situacao, st.TipoDocumento)
+		t.Logf("chave=%s found=%v importado=%v tipo=%s empresa=%v/%q emit=%q/%q dest=%q data=%q",
+			c, ok, st.Importado, st.TipoDocumento, st.CodigoEmpresa, st.NomeEmpresa,
+			st.CnpjEmitente, st.NomeEmitente, st.CnpjDestinatario, st.DataEmissao)
 	}
 }
 
