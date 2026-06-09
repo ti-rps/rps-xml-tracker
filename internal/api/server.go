@@ -161,11 +161,16 @@ func (s *Server) handleGetNota(c *gin.Context) {
 
 func (s *Server) handleListNotas(c *gin.Context) {
 	f := store.NotaFilter{
-		Status:     model.NotaStatus(c.Query("status")),
-		DocType:    model.DocType(c.Query("doc_type")),
-		ChaveQuery: c.Query("q"),
-		Limit:      atoiDefault(c.Query("limit"), 50),
-		Offset:     atoiDefault(c.Query("offset"), 0),
+		Status:       model.NotaStatus(c.Query("status")),
+		DocType:      model.DocType(c.Query("doc_type")),
+		EmpresaQuery: c.Query("empresa"),
+		Cnpj:         c.Query("cnpj"),
+		ChaveQuery:   c.Query("q"),
+		DateField:    c.Query("date_field"),
+		From:         c.Query("from"),
+		To:           c.Query("to"),
+		Limit:        atoiDefault(c.Query("limit"), 50),
+		Offset:       atoiDefault(c.Query("offset"), 0),
 	}
 	if v := c.Query("codigo_empresa"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

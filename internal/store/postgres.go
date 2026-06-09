@@ -57,15 +57,16 @@ func (p *Postgres) AppendObservations(ctx context.Context, obs []model.Observati
 			INSERT INTO observations
 			  (chave_acesso, stage, event_type, observed_at, ingested_at, source,
 			   doc_type, file_path, file_hash, codigo_empresa, codigo_filial, payload, dedup_key,
-			   cnpj_emitente, nome_emitente, cnpj_destinatario, nome_destinatario, data_emissao, valor_total)
+			   cnpj_emitente, nome_emitente, cnpj_destinatario, nome_destinatario, data_emissao, valor_total,
+			   empresa_nome)
 			VALUES ($1,$2::stage,$3,$4,$5,$6,$7::doc_type,$8,$9,$10,$11,$12::jsonb,$13,
-			        $14,$15,$16,$17,$18::date,$19)
+			        $14,$15,$16,$17,$18::date,$19,$20)
 			ON CONFLICT (dedup_key) DO NOTHING`,
 			o.ChaveAcesso, string(o.Stage), o.EventType, o.ObservedAt, o.IngestedAt, o.Source,
 			docTypeOrDefault(o.DocType), nullStr(o.FilePath), nullStr(o.FileHash),
 			o.CodigoEmpresa, o.CodigoFilial, payload, DedupKey(o),
 			nullStr(o.CnpjEmitente), nullStr(o.NomeEmitente), nullStr(o.CnpjDestinatario),
-			nullStr(o.NomeDestinatario), nullStr(o.DataEmissao), o.ValorTotal)
+			nullStr(o.NomeDestinatario), nullStr(o.DataEmissao), o.ValorTotal, nullStr(o.NomeEmpresa))
 		if err != nil {
 			return 0, 0, err
 		}
@@ -126,8 +127,24 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 	if f.CodigoEmpresa != nil {
 		add("codigo_empresa = $%d", *f.CodigoEmpresa)
 	}
+	if f.EmpresaQuery != "" {
+		add("empresa_nome ILIKE $%d", "%"+f.EmpresaQuery+"%")
+	}
+	if f.Cnpj != "" {
+		// casa emitente OU destinatário num único placeholder
+		args = append(args, "%"+f.Cnpj+"%")
+		where = append(where, fmt.Sprintf("(cnpj_emitente LIKE $%d OR cnpj_destinatario LIKE $%d)", len(args), len(args)))
+	}
 	if f.ChaveQuery != "" {
 		add("chave_acesso LIKE $%d", "%"+f.ChaveQuery+"%")
+	}
+	if col := dateColumn(f.DateField); col != "" {
+		if f.From != "" {
+			add(col+" >= $%d::date", f.From)
+		}
+		if f.To != "" {
+			add(col+" <= $%d::date", f.To)
+		}
 	}
 	clause := ""
 	if len(where) > 0 {
@@ -351,17 +368,21 @@ const notaSelect = `
 	SELECT chave_acesso, doc_type, status, codigo_empresa, codigo_filial,
 	       arrived_at, synced_at, imported_at, import_ignored, motivo_ignorado,
 	       first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
-	       cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total
+	       cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
+	       empresa_nome
 	FROM notas`
 
 func scanNota(r rowScanner) (model.Nota, error) {
 	var n model.Nota
-	var motivo, cnpjE, nomeE, cnpjD, nomeD *string
+	var motivo, cnpjE, nomeE, cnpjD, nomeD, empNome *string
 	var emissao *time.Time
 	err := r.Scan(&n.ChaveAcesso, &n.DocType, &n.Status, &n.CodigoEmpresa, &n.CodigoFilial,
 		&n.ArrivedAt, &n.SyncedAt, &n.ImportedAt, &n.ImportIgnored, &motivo,
 		&n.FirstSeenAt, &n.LastUpdateAt, &n.LatArrivalSyncS, &n.LatSyncImportS,
-		&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &n.ValorTotal)
+		&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &n.ValorTotal, &empNome)
+	if empNome != nil {
+		n.NomeEmpresa = *empNome
+	}
 	if motivo != nil {
 		n.MotivoIgnorado = *motivo
 	}
@@ -389,9 +410,10 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		  (chave_acesso, doc_type, status, codigo_empresa, codigo_filial,
 		   arrived_at, synced_at, imported_at, import_ignored, motivo_ignorado,
 		   first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
-		   cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total)
+		   cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
+		   empresa_nome)
 		VALUES ($1,$2::doc_type,$3::nota_status,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-		        $15,$16,$17,$18,$19::date,$20)
+		        $15,$16,$17,$18,$19::date,$20,$21)
 		ON CONFLICT (chave_acesso) DO UPDATE SET
 		  doc_type=EXCLUDED.doc_type, status=EXCLUDED.status,
 		  codigo_empresa=COALESCE(EXCLUDED.codigo_empresa, notas.codigo_empresa),
@@ -405,12 +427,13 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		  cnpj_destinatario=COALESCE(EXCLUDED.cnpj_destinatario, notas.cnpj_destinatario),
 		  destinatario_nome=COALESCE(EXCLUDED.destinatario_nome, notas.destinatario_nome),
 		  data_emissao=COALESCE(EXCLUDED.data_emissao, notas.data_emissao),
-		  valor_total=COALESCE(EXCLUDED.valor_total, notas.valor_total)`,
+		  valor_total=COALESCE(EXCLUDED.valor_total, notas.valor_total),
+		  empresa_nome=COALESCE(EXCLUDED.empresa_nome, notas.empresa_nome)`,
 		n.ChaveAcesso, docTypeOrDefault(n.DocType), string(n.Status), n.CodigoEmpresa, n.CodigoFilial,
 		n.ArrivedAt, n.SyncedAt, n.ImportedAt, n.ImportIgnored, nullStr(n.MotivoIgnorado),
 		n.FirstSeenAt, n.LastUpdateAt, n.LatArrivalSyncS, n.LatSyncImportS,
 		nullStr(n.CnpjEmitente), nullStr(n.NomeEmitente), nullStr(n.CnpjDestinatario),
-		nullStr(n.NomeDestinatario), nullStr(n.DataEmissao), n.ValorTotal)
+		nullStr(n.NomeDestinatario), nullStr(n.DataEmissao), n.ValorTotal, nullStr(n.NomeEmpresa))
 	return err
 }
 
@@ -418,7 +441,8 @@ func loadObservations(ctx context.Context, q querier, chave string) ([]model.Obs
 	rows, err := q.Query(ctx, `
 		SELECT id, chave_acesso, stage, event_type, observed_at, ingested_at, source,
 		       doc_type, file_path, codigo_empresa, codigo_filial, payload,
-		       cnpj_emitente, nome_emitente, cnpj_destinatario, nome_destinatario, data_emissao, valor_total
+		       cnpj_emitente, nome_emitente, cnpj_destinatario, nome_destinatario, data_emissao, valor_total,
+		       empresa_nome
 		FROM observations WHERE chave_acesso = $1 ORDER BY observed_at`, chave)
 	if err != nil {
 		return nil, err
@@ -427,13 +451,16 @@ func loadObservations(ctx context.Context, q querier, chave string) ([]model.Obs
 	var out []model.Observation
 	for rows.Next() {
 		var o model.Observation
-		var filePath, cnpjE, nomeE, cnpjD, nomeD *string
+		var filePath, cnpjE, nomeE, cnpjD, nomeD, empNome *string
 		var emissao *time.Time
 		var payload []byte
 		if err := rows.Scan(&o.ID, &o.ChaveAcesso, &o.Stage, &o.EventType, &o.ObservedAt,
 			&o.IngestedAt, &o.Source, &o.DocType, &filePath, &o.CodigoEmpresa, &o.CodigoFilial, &payload,
-			&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &o.ValorTotal); err != nil {
+			&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &o.ValorTotal, &empNome); err != nil {
 			return nil, err
+		}
+		if empNome != nil {
+			o.NomeEmpresa = *empNome
 		}
 		if filePath != nil {
 			o.FilePath = *filePath

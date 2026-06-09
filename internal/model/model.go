@@ -62,6 +62,7 @@ type Observation struct {
 	CodigoEmpresa *int      `json:"codigo_empresa,omitempty"`
 	CodigoFilial  *int      `json:"codigo_filial,omitempty"`
 	// metadados da nota (do parse do XML ou da linha do Firebird)
+	NomeEmpresa      string         `json:"nome_empresa,omitempty"`
 	CnpjEmitente     string         `json:"cnpj_emitente,omitempty"`
 	NomeEmitente     string         `json:"nome_emitente,omitempty"`
 	CnpjDestinatario string         `json:"cnpj_destinatario,omitempty"`
@@ -78,6 +79,7 @@ type Nota struct {
 	Status           NotaStatus `json:"status"`
 	CodigoEmpresa    *int       `json:"codigo_empresa,omitempty"`
 	CodigoFilial     *int       `json:"codigo_filial,omitempty"`
+	NomeEmpresa      string     `json:"nome_empresa,omitempty"`
 	CnpjEmitente     string     `json:"cnpj_emitente,omitempty"`
 	NomeEmitente     string     `json:"nome_emitente,omitempty"`
 	CnpjDestinatario string     `json:"cnpj_destinatario,omitempty"`
