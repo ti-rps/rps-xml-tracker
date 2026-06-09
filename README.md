@@ -13,7 +13,9 @@ Rastreabilidade ponta-a-ponta de notas fiscais (XML) da RPS Contábil. Trata a *
 - `cmd/api` — API HTTP (Gin). Ingestão (HMAC do agente) + leitura (JWT do maestro).
 - `internal/derive` — função pura: observações → estado derivado da nota.
 - `internal/store` — interface `Store` com impl em memória e **Postgres (pgx)**.
-- (próximos) `cmd/poller` (Firebird, chave-driven) e `cmd/agent` (watch em SRVIMPORT).
+- `cmd/poller` — fecha a etapa de **importação**: lê o Firebird do Athenas (read-only,
+  chave-driven) e emite observações `imported`/`import_ignored`. `internal/firebird` é o leitor RO.
+- (próximo) `cmd/agent` — watch recursivo em SRVIMPORT + parse + POST assinado.
 
 ## Rodar local
 
@@ -35,10 +37,18 @@ TRACKER_STORE=postgres TRACKER_PG_DSN="$DSN" \
 API em `:8090` (configurável por `TRACKER_API_PORT`). `MAESTRO_JWT_SECRET` e
 `TRACKER_AGENT_SECRET` são obrigatórios (fail-closed).
 
+### Poller (Firebird)
+```bash
+TRACKER_FB_DSN='SYSDBA:masterkey@192.168.10.160:3050/e:\Athenas\rps.fdb?charset=NONE&auth_plugin_name=Legacy_Auth&wire_crypt=disabled' \
+TRACKER_STORE=postgres TRACKER_PG_DSN="$DSN" TRACKER_POLL_INTERVAL=30s go run ./cmd/poller
+```
+
 ## Testes
 ```bash
 go test ./...                                   # unitários + httptest (sem banco)
-TRACKER_TEST_PG_DSN="$DSN" go test ./internal/store/   # + integração Postgres (aplica a migração)
+TRACKER_TEST_PG_DSN="$DSN" go test ./internal/store/    # + integração Postgres (aplica a migração)
+# leitor + poller contra o Firebird real (read-only):
+TRACKER_TEST_FB_DSN="..." TRACKER_TEST_FB_CHAVE="<chave importada>" go test ./internal/firebird/ ./internal/poller/
 ```
 
 ## Variáveis de ambiente
@@ -49,3 +59,5 @@ TRACKER_TEST_PG_DSN="$DSN" go test ./internal/store/   # + integração Postgres
 | `TRACKER_STORE` | `memory` (default) ou `postgres` |
 | `TRACKER_PG_DSN` | DSN do Postgres (com `TRACKER_STORE=postgres`) |
 | `TRACKER_API_PORT` | porta da API (default `8090`) |
+| `TRACKER_FB_DSN` | DSN do Firebird do Athenas (read-only) — usado pelo `cmd/poller` |
+| `TRACKER_POLL_INTERVAL` | intervalo do poller (default `30s`) |

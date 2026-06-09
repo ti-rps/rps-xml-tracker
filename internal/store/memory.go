@@ -88,6 +88,26 @@ func (m *Memory) ListNotas(_ context.Context, f NotaFilter) ([]model.Nota, int, 
 	return all[lo:hi], total, nil
 }
 
+func (m *Memory) ListInflightChaves(_ context.Context, limit int) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	byChave := map[string][]model.Observation{}
+	for _, o := range m.obs {
+		byChave[o.ChaveAcesso] = append(byChave[o.ChaveAcesso], o)
+	}
+	var out []string
+	for chave, spans := range byChave {
+		s := derive.Nota(chave, spans).Status
+		if s == model.StatusArrived || s == model.StatusSynced {
+			out = append(out, chave)
+			if limit > 0 && len(out) >= limit {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 func (m *Memory) spansFor(chave string) []model.Observation {
 	var spans []model.Observation
 	for _, o := range m.obs {

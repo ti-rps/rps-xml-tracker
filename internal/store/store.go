@@ -21,6 +21,10 @@ type Store interface {
 
 	// ListNotas returns derived notas matching the filter (limit/offset paging).
 	ListNotas(ctx context.Context, f NotaFilter) (items []model.Nota, total int, err error)
+
+	// ListInflightChaves returns chaves still in flight (status arrived/synced —
+	// not yet imported/import_ignored), for the chave-driven Firebird poller.
+	ListInflightChaves(ctx context.Context, limit int) ([]string, error)
 }
 
 // NotaFilter holds the supported list filters.

@@ -156,6 +156,28 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 	return items, total, rows.Err()
 }
 
+func (p *Postgres) ListInflightChaves(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := p.pool.Query(ctx,
+		`SELECT chave_acesso FROM notas
+		 WHERE status IN ('arrived','synced') ORDER BY last_update_at LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // ---- helpers ----
 
 // rowScanner unifies pgx.Row and pgx.Rows for scanNota.
