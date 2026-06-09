@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -103,6 +104,11 @@ type Result struct {
 	Seeded         bool
 }
 
+const (
+	flushSeenEvery = 2000 // grava o estado bbolt em lotes (não 1 transação/arquivo)
+	progressEvery  = 5000 // loga progresso a cada N arquivos escaneados
+)
+
 // ScanOnce flushes any spooled batches, then scans all roots once.
 func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 	var res Result
@@ -114,7 +120,9 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 	res.Seeded = seeding
 
 	batch := make([]model.Observation, 0, a.cfg.BatchSize)
-	flush := func() error {
+	pending := make(map[string]fileState, flushSeenEvery) // estado a gravar em lote
+
+	flushObs := func() error {
 		if len(batch) == 0 {
 			return nil
 		}
@@ -122,6 +130,35 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 			return err
 		}
 		batch = batch[:0]
+		return nil
+	}
+	flushState := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		err := a.db.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket(seenBucket)
+			for p, st := range pending {
+				v, _ := json.Marshal(st)
+				if e := b.Put([]byte(p), v); e != nil {
+					return e
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for k := range pending {
+			delete(pending, k)
+		}
+		return nil
+	}
+	record := func(path string, info fs.FileInfo, chave string) error {
+		pending[path] = fileState{Size: info.Size(), ModUnix: info.ModTime().Unix(), Chave: chave}
+		if len(pending) >= flushSeenEvery {
+			return flushState()
+		}
 		return nil
 	}
 
@@ -137,6 +174,10 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 				return ctx.Err()
 			}
 			res.Scanned++
+			if res.Scanned%progressEvery == 0 {
+				log.Printf("scan em progresso: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
+					res.Scanned, res.New, res.Emitted, res.SkippedNoChave)
+			}
 
 			info, ierr := d.Info()
 			if ierr != nil {
@@ -152,12 +193,13 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 			res.New++
 
 			if seeding {
-				a.markSeen(path, info, "")
-				return nil
+				return record(path, info, "")
 			}
 
 			obs, chave, ok := a.parseToObservation(root, path, info)
-			a.markSeen(path, info, chave)
+			if err := record(path, info, chave); err != nil {
+				return err
+			}
 			if !ok {
 				res.SkippedNoChave++
 				return nil
@@ -165,7 +207,7 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 			batch = append(batch, obs)
 			res.Emitted++
 			if len(batch) >= a.cfg.BatchSize {
-				return flush()
+				return flushObs()
 			}
 			return nil
 		})
@@ -173,7 +215,10 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 			return res, err
 		}
 	}
-	if err := flush(); err != nil {
+	if err := flushObs(); err != nil {
+		return res, err
+	}
+	if err := flushState(); err != nil {
 		return res, err
 	}
 	if seeding {
@@ -260,13 +305,6 @@ func (a *Agent) alreadySeen(path string, info fs.FileInfo) bool {
 		return nil
 	})
 	return seen
-}
-
-func (a *Agent) markSeen(path string, info fs.FileInfo, chave string) {
-	st, _ := json.Marshal(fileState{Size: info.Size(), ModUnix: info.ModTime().Unix(), Chave: chave})
-	_ = a.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(seenBucket).Put([]byte(path), st)
-	})
 }
 
 func (a *Agent) initialized() bool {

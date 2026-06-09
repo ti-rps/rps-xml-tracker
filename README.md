@@ -93,8 +93,9 @@ Mesmo padrão do `bot-xml-gms`: o repositório é clonado no SRVRPS03 e o build 
 1. No SRVRPS03, clonar o repo e criar o `.env` a partir do `.env.example` (preencher o
    **mesmo `MAESTRO_JWT_SECRET` do maestro**, `TRACKER_AGENT_SECRET`, senha do Postgres e
    `TRACKER_FB_DSN`).
-2. Subir: `docker compose up --build -d` (sobe `tracker-postgres`, `tracker-api` na porta 8090,
-   `tracker-poller`). As migrações são aplicadas no boot da API (goose embarcado).
+2. Subir: `docker compose up --build -d`. Sobe `tracker-postgres`, roda `tracker-migrate`
+   (one-shot, aplica as migrações goose embarcadas) e só então `tracker-api` (porta 8090) e
+   `tracker-poller` — sem corrida de schema no cold start.
 3. CI opcional: `.github/workflows/deploy.yml` (runner self-hosted) faz `git pull` +
    `docker compose up --build -d` a cada push na `main` — exige o secret `PROD_DEPLOY_PATH`.
 

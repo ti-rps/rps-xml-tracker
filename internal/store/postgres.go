@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -178,7 +179,155 @@ func (p *Postgres) ListInflightChaves(ctx context.Context, limit int) ([]string,
 	return out, rows.Err()
 }
 
+func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
+	var ov model.Overview
+	rows, err := p.pool.Query(ctx, `SELECT status, count(*) FROM notas GROUP BY status`)
+	if err != nil {
+		return ov, err
+	}
+	for rows.Next() {
+		var s string
+		var c int
+		if err := rows.Scan(&s, &c); err != nil {
+			rows.Close()
+			return ov, err
+		}
+		addStatusN(&ov.StatusCounts, model.NotaStatus(s), c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return ov, err
+	}
+
+	if err := p.pool.QueryRow(ctx,
+		`SELECT count(*) FROM notas WHERE imported_at::date = current_date`).Scan(&ov.ImportedToday); err != nil {
+		return ov, err
+	}
+
+	var a50, a95, s50, s95 *float64
+	if err := p.pool.QueryRow(ctx, `SELECT
+		percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s),
+		percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s),
+		percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_sync_import_s),
+		percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_sync_import_s)
+		FROM notas`).Scan(&a50, &a95, &s50, &s95); err != nil {
+		return ov, err
+	}
+	ov.InTransit = ov.Arrived + ov.Synced
+	ov.LatArrivalSyncP50S, ov.LatArrivalSyncP95S = f2i(a50), f2i(a95)
+	ov.LatSyncImportP50S, ov.LatSyncImportP95S = f2i(s50), f2i(s95)
+	return ov, nil
+}
+
+func (p *Postgres) Empresas(ctx context.Context, pendentesOnly bool) ([]model.EmpresaAgg, error) {
+	rows, err := p.pool.Query(ctx, `
+		SELECT codigo_empresa, codigo_filial,
+		  count(*) FILTER (WHERE status='arrived'),
+		  count(*) FILTER (WHERE status='synced'),
+		  count(*) FILTER (WHERE status='imported'),
+		  count(*) FILTER (WHERE status='import_ignored'),
+		  count(*) FILTER (WHERE status='pending_import'),
+		  count(*) FILTER (WHERE status='stuck'),
+		  count(*) FILTER (WHERE status='lost')
+		FROM notas WHERE codigo_empresa IS NOT NULL
+		GROUP BY codigo_empresa, codigo_filial
+		ORDER BY codigo_empresa, codigo_filial`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.EmpresaAgg{}
+	for rows.Next() {
+		var a model.EmpresaAgg
+		var c model.StatusCounts
+		if err := rows.Scan(&a.CodigoEmpresa, &a.CodigoFilial,
+			&c.Arrived, &c.Synced, &c.Imported, &c.ImportIgnored, &c.PendingImport, &c.Stuck, &c.Lost); err != nil {
+			return nil, err
+		}
+		a.StatusCounts = c
+		if pendentesOnly && pendentes(c) == 0 {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) ListNfseImport(ctx context.Context, f NfseFilter) ([]model.NfseImport, int, error) {
+	where, args := []string{}, []any{}
+	if f.Status != "" {
+		args = append(args, string(f.Status))
+		where = append(where, fmt.Sprintf("status = $%d::nota_status", len(args)))
+	}
+	clause := ""
+	if len(where) > 0 {
+		clause = " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int
+	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM nfse_import`+clause, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	args = append(args, limit, f.Offset)
+	q := `SELECT athenas_chave, status, motivo_ignorado, data_emissao FROM nfse_import` + clause +
+		fmt.Sprintf(" ORDER BY data_inclusao DESC NULLS LAST LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	items := []model.NfseImport{}
+	for rows.Next() {
+		var it model.NfseImport
+		var motivo *string
+		var emissao *time.Time
+		if err := rows.Scan(&it.AthenasChave, &it.Status, &motivo, &emissao); err != nil {
+			return nil, 0, err
+		}
+		if motivo != nil {
+			it.MotivoIgnorado = *motivo
+		}
+		if emissao != nil {
+			s := emissao.Format("2006-01-02")
+			it.DataEmissao = &s
+		}
+		items = append(items, it)
+	}
+	return items, total, rows.Err()
+}
+
 // ---- helpers ----
+
+// addStatusN adds n to the counter for status s.
+func addStatusN(c *model.StatusCounts, s model.NotaStatus, n int) {
+	switch s {
+	case model.StatusArrived:
+		c.Arrived += n
+	case model.StatusSynced:
+		c.Synced += n
+	case model.StatusImported:
+		c.Imported += n
+	case model.StatusImportIgnored:
+		c.ImportIgnored += n
+	case model.StatusPendingImport:
+		c.PendingImport += n
+	case model.StatusStuck:
+		c.Stuck += n
+	case model.StatusLost:
+		c.Lost += n
+	}
+}
+
+func f2i(f *float64) *int64 {
+	if f == nil {
+		return nil
+	}
+	v := int64(*f + 0.5)
+	return &v
+}
 
 // rowScanner unifies pgx.Row and pgx.Rows for scanNota.
 type rowScanner interface{ Scan(dest ...any) error }

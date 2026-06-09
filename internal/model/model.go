@@ -88,3 +88,42 @@ type NotaDetail struct {
 	Nota
 	Spans []Observation `json:"spans"`
 }
+
+// StatusCounts holds per-status totals (shared by overview and per-empresa).
+type StatusCounts struct {
+	Arrived       int `json:"arrived"`
+	Synced        int `json:"synced"`
+	Imported      int `json:"imported"`
+	ImportIgnored int `json:"import_ignored"`
+	PendingImport int `json:"pending_import"`
+	Stuck         int `json:"stuck"`
+	Lost          int `json:"lost"`
+}
+
+// Overview is the dashboard's summary cards.
+type Overview struct {
+	StatusCounts
+	InTransit     int `json:"in_transit"`      // arrived + synced
+	ImportedToday int `json:"imported_today"`
+	// latências (segundos); nil quando não há amostra
+	LatArrivalSyncP50S *int64 `json:"lat_arrival_sync_p50_s,omitempty"`
+	LatArrivalSyncP95S *int64 `json:"lat_arrival_sync_p95_s,omitempty"`
+	LatSyncImportP50S  *int64 `json:"lat_sync_import_p50_s,omitempty"`
+	LatSyncImportP95S  *int64 `json:"lat_sync_import_p95_s,omitempty"`
+}
+
+// EmpresaAgg is the per-empresa status breakdown (quem está pendente).
+type EmpresaAgg struct {
+	CodigoEmpresa *int `json:"codigo_empresa,omitempty"`
+	CodigoFilial  *int `json:"codigo_filial,omitempty"`
+	StatusCounts
+}
+
+// NfseImport is one NFSe import-side record (lado Firebird; sem etapa de chegada).
+type NfseImport struct {
+	AthenasChave   string     `json:"athenas_chave"`
+	CodigoEmpresa  *int       `json:"codigo_empresa,omitempty"`
+	Status         NotaStatus `json:"status"`
+	MotivoIgnorado string     `json:"motivo_ignorado,omitempty"`
+	DataEmissao    *string    `json:"data_emissao,omitempty"`
+}

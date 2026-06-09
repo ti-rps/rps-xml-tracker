@@ -25,6 +25,24 @@ type Store interface {
 	// ListInflightChaves returns chaves still in flight (status arrived/synced —
 	// not yet imported/import_ignored), for the chave-driven Firebird poller.
 	ListInflightChaves(ctx context.Context, limit int) ([]string, error)
+
+	// Overview returns the dashboard summary cards.
+	Overview(ctx context.Context) (model.Overview, error)
+
+	// Empresas returns the per-empresa status breakdown; pendentesOnly filters to
+	// empresas with non-terminal items (arrived/synced/stuck/pending_import).
+	Empresas(ctx context.Context, pendentesOnly bool) ([]model.EmpresaAgg, error)
+
+	// ListNfseImport returns NFSe import-side records (lado Firebird).
+	ListNfseImport(ctx context.Context, f NfseFilter) (items []model.NfseImport, total int, err error)
+}
+
+// NfseFilter holds the supported NFSe list filters.
+type NfseFilter struct {
+	CodigoEmpresa *int
+	Status        model.NotaStatus
+	Limit         int
+	Offset        int
 }
 
 // NotaFilter holds the supported list filters.
