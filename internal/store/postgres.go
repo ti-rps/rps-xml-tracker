@@ -157,13 +157,24 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 	return items, total, rows.Err()
 }
 
+// ListInflightChaves returns the LEAST-recently-polled in-flight chaves and
+// stamps them as polled now — so successive cycles rotate through ALL in-flight
+// notas instead of re-checking the same oldest batch forever (Fase 1 fix).
 func (p *Postgres) ListInflightChaves(ctx context.Context, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := p.pool.Query(ctx,
-		`SELECT chave_acesso FROM notas
-		 WHERE status IN ('arrived','synced') ORDER BY last_update_at LIMIT $1`, limit)
+	rows, err := p.pool.Query(ctx, `
+		WITH picked AS (
+		  SELECT chave_acesso FROM notas
+		  WHERE status IN ('arrived','synced')
+		  ORDER BY last_polled_at ASC NULLS FIRST
+		  LIMIT $1
+		  FOR UPDATE SKIP LOCKED
+		)
+		UPDATE notas n SET last_polled_at = now()
+		FROM picked WHERE n.chave_acesso = picked.chave_acesso
+		RETURNING n.chave_acesso`, limit)
 	if err != nil {
 		return nil, err
 	}

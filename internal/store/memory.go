@@ -15,14 +15,15 @@ import (
 // append-only observations and derives notas on read — mirroring how the
 // Postgres impl will behave (observations are the source of truth).
 type Memory struct {
-	mu     sync.RWMutex
-	obs    []model.Observation
-	seen   map[string]struct{} // dedup keys
-	nextID int64
+	mu         sync.RWMutex
+	obs        []model.Observation
+	seen       map[string]struct{}  // dedup keys
+	lastPolled map[string]time.Time // chave -> última vez checada pelo poller
+	nextID     int64
 }
 
 func NewMemory() *Memory {
-	return &Memory{seen: map[string]struct{}{}}
+	return &Memory{seen: map[string]struct{}{}, lastPolled: map[string]time.Time{}}
 }
 
 func (m *Memory) AppendObservations(_ context.Context, obs []model.Observation) (int, int, error) {
@@ -89,23 +90,31 @@ func (m *Memory) ListNotas(_ context.Context, f NotaFilter) ([]model.Nota, int, 
 }
 
 func (m *Memory) ListInflightChaves(_ context.Context, limit int) ([]string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock() // Lock (não RLock): também atualiza lastPolled (rotação)
+	defer m.mu.Unlock()
 	byChave := map[string][]model.Observation{}
 	for _, o := range m.obs {
 		byChave[o.ChaveAcesso] = append(byChave[o.ChaveAcesso], o)
 	}
-	var out []string
+	var inflight []string
 	for chave, spans := range byChave {
 		s := derive.Nota(chave, spans).Status
 		if s == model.StatusArrived || s == model.StatusSynced {
-			out = append(out, chave)
-			if limit > 0 && len(out) >= limit {
-				break
-			}
+			inflight = append(inflight, chave)
 		}
 	}
-	return out, nil
+	// menos recentemente checadas primeiro (zero-value = nunca checada = primeiro)
+	sort.Slice(inflight, func(i, j int) bool {
+		return m.lastPolled[inflight[i]].Before(m.lastPolled[inflight[j]])
+	})
+	if limit > 0 && len(inflight) > limit {
+		inflight = inflight[:limit]
+	}
+	now := time.Now()
+	for _, c := range inflight {
+		m.lastPolled[c] = now
+	}
+	return inflight, nil
 }
 
 func (m *Memory) allNotas() []model.Nota {
