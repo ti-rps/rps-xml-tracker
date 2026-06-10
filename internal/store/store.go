@@ -29,12 +29,20 @@ type Store interface {
 	// Overview returns the dashboard summary cards.
 	Overview(ctx context.Context) (model.Overview, error)
 
-	// Empresas returns the per-empresa status breakdown; pendentesOnly filters to
-	// empresas with non-terminal items (arrived/synced/stuck/pending_import).
-	Empresas(ctx context.Context, pendentesOnly bool) ([]model.EmpresaAgg, error)
+	// Empresas returns the per-empresa status breakdown. total is the number of
+	// empresas matching the filter (before limit/offset), for pagination.
+	Empresas(ctx context.Context, f EmpresaFilter) (items []model.EmpresaAgg, total int, err error)
 
 	// ListNfseImport returns NFSe import-side records (lado Firebird).
 	ListNfseImport(ctx context.Context, f NfseFilter) (items []model.NfseImport, total int, err error)
+}
+
+// EmpresaFilter holds the supported per-empresa aggregation filters.
+type EmpresaFilter struct {
+	PendentesOnly bool   // só empresas com itens não-terminais (arrived/synced/pending_import/stuck)
+	Sort          string // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
+	Limit         int    // <=0 retorna todas (sem paginação)
+	Offset        int
 }
 
 // NfseFilter holds the supported NFSe list filters.

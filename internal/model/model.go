@@ -129,8 +129,10 @@ type Overview struct {
 
 // EmpresaAgg is the per-empresa status breakdown (quem está pendente).
 type EmpresaAgg struct {
-	CodigoEmpresa *int `json:"codigo_empresa,omitempty"`
-	CodigoFilial  *int `json:"codigo_filial,omitempty"`
+	CodigoEmpresa *int   `json:"codigo_empresa,omitempty"`
+	CodigoFilial  *int   `json:"codigo_filial,omitempty"`
+	NomeEmpresa   string `json:"nome_empresa,omitempty"`
+	InTransit     int    `json:"in_transit"` // arrived + synced
 	StatusCounts
 }
 

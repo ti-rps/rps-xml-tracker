@@ -251,38 +251,60 @@ func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
 	return ov, nil
 }
 
-func (p *Postgres) Empresas(ctx context.Context, pendentesOnly bool) ([]model.EmpresaAgg, error) {
-	rows, err := p.pool.Query(ctx, `
-		SELECT codigo_empresa, codigo_filial,
+func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
+	// pendentes = itens não-terminais (espelha pendentes() do store em memória).
+	const pend = "count(*) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck'))"
+	having := ""
+	if f.PendentesOnly {
+		having = "HAVING " + pend + " > 0"
+	}
+	order := "codigo_empresa, codigo_filial"
+	if f.Sort == "pendentes" {
+		order = pend + " DESC, codigo_empresa, codigo_filial"
+	}
+	args := []any{}
+	limit := ""
+	if f.Limit > 0 {
+		args = append(args, f.Limit, f.Offset)
+		limit = fmt.Sprintf("LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	}
+	// count(*) OVER () é avaliado após GROUP BY/HAVING e antes do LIMIT, então dá
+	// o total de empresas que casam o filtro (para paginação).
+	q := fmt.Sprintf(`
+		SELECT codigo_empresa, codigo_filial, COALESCE(max(nome_empresa), ''),
 		  count(*) FILTER (WHERE status='arrived'),
 		  count(*) FILTER (WHERE status='synced'),
 		  count(*) FILTER (WHERE status='imported'),
 		  count(*) FILTER (WHERE status='import_ignored'),
 		  count(*) FILTER (WHERE status='pending_import'),
 		  count(*) FILTER (WHERE status='stuck'),
-		  count(*) FILTER (WHERE status='lost')
+		  count(*) FILTER (WHERE status='lost'),
+		  count(*) OVER ()
 		FROM notas WHERE codigo_empresa IS NOT NULL
 		GROUP BY codigo_empresa, codigo_filial
-		ORDER BY codigo_empresa, codigo_filial`)
+		%s
+		ORDER BY %s
+		%s`, having, order, limit)
+	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []model.EmpresaAgg{}
+	total := 0
 	for rows.Next() {
 		var a model.EmpresaAgg
 		var c model.StatusCounts
-		if err := rows.Scan(&a.CodigoEmpresa, &a.CodigoFilial,
-			&c.Arrived, &c.Synced, &c.Imported, &c.ImportIgnored, &c.PendingImport, &c.Stuck, &c.Lost); err != nil {
-			return nil, err
+		if err := rows.Scan(&a.CodigoEmpresa, &a.CodigoFilial, &a.NomeEmpresa,
+			&c.Arrived, &c.Synced, &c.Imported, &c.ImportIgnored, &c.PendingImport, &c.Stuck, &c.Lost,
+			&total); err != nil {
+			return nil, 0, err
 		}
 		a.StatusCounts = c
-		if pendentesOnly && pendentes(c) == 0 {
-			continue
-		}
+		a.InTransit = c.Arrived + c.Synced
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (p *Postgres) ListNfseImport(ctx context.Context, f NfseFilter) ([]model.NfseImport, int, error) {
