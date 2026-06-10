@@ -255,11 +255,19 @@ func (a *Agent) parseToObservation(root Root, path string, info fs.FileInfo) (mo
 		return model.Observation{}, "", false
 	}
 	emp, fil := empresaFromPath(root.Path, path)
+	// Arrival time = file mtime (≈ quando o XML foi escrito na chegada). Na etapa
+	// sync o mover preserva o mtime original ao mover para SINCRONIZADO, então o
+	// mtime NÃO diz quando sincronizou — usamos a hora de detecção do agente
+	// (now), dando um instante de sync real (com precisão de ±intervalo de scan).
+	observedAt := info.ModTime()
+	if root.Stage == model.StageSync {
+		observedAt = a.now()
+	}
 	obs := model.Observation{
 		ChaveAcesso:      pr.Chave,
 		Stage:            root.Stage,
 		EventType:        root.Event,
-		ObservedAt:       info.ModTime(),
+		ObservedAt:       observedAt,
 		Source:           "agent:" + a.cfg.Name,
 		DocType:          pr.DocType,
 		FilePath:         path,

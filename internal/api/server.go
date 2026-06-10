@@ -95,12 +95,18 @@ func (s *Server) handleOverview(c *gin.Context) {
 }
 
 func (s *Server) handleEmpresas(c *gin.Context) {
-	items, err := s.st.Empresas(c.Request.Context(), c.Query("pendentes") == "true")
+	f := store.EmpresaFilter{
+		PendentesOnly: c.Query("pendentes") == "true",
+		Sort:          c.Query("sort"),
+		Limit:         atoiDefault(c.Query("limit"), 0), // 0 = todas (sem paginação)
+		Offset:        atoiDefault(c.Query("offset"), 0),
+	}
+	items, total, err := s.st.Empresas(c.Request.Context(), f)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao listar empresas"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "limit": f.Limit, "offset": f.Offset})
 }
 
 func (s *Server) handleNfseImport(c *gin.Context) {

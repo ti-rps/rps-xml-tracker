@@ -2,41 +2,98 @@
 // READ-ONLY, extracts the chave from new files, and submits signed observation
 // batches to the tracker API. See internal/agent for the design.
 //
+// It can run in the foreground (no argument) or as a native Windows service:
+//
+//	agent.exe install      instala o serviço (captura as TRACKER_* atuais) e inicia
+//	agent.exe uninstall    remove o serviço
+//	agent.exe start|stop|restart|status
+//
+// Como serviço ele sobe no boot (StartType=Automatic) e reinicia sozinho se cair
+// (OnFailure=restart), independente de sessão de login. As variáveis abaixo são
+// lidas do ambiente; no install elas são gravadas no registro do serviço, então
+// configure-as no shell ANTES de rodar "agent.exe install".
+//
 // Config (env):
 //
 //	TRACKER_API_URL          ex.: http://192.168.10.46:8090   (obrigatório)
 //	TRACKER_AGENT_SECRET     segredo HMAC compartilhado        (obrigatório)
-//	TRACKER_AGENT_NAME       default "SRVIMPORT"
 //	TRACKER_AGENT_ARRIVAL_ROOT  ex.: F:\Xml_ASincronizar       (obrigatório)
 //	TRACKER_AGENT_SYNC_ROOT     ex.: F:\XML SINCRONIZADO        (opcional)
-//	TRACKER_AGENT_STATE      default "agent-state.db"
-//	TRACKER_AGENT_SPOOL      default "agent-spool"
+//	TRACKER_AGENT_NAME       default "SRVIMPORT"
+//	TRACKER_AGENT_STATE      default <dir do exe>\agent-state.db
+//	TRACKER_AGENT_SPOOL      default <dir do exe>\agent-spool
 //	TRACKER_AGENT_SCAN_INTERVAL  default "60s"
 //	TRACKER_AGENT_BACKFILL   "true" para processar o backlog (default false)
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
-	"os/signal"
-	"syscall"
+	"path/filepath"
+	"strings"
+	"sync"
 	"time"
+
+	"github.com/kardianos/service"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/agent"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/ingest"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 )
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+const svcName = "RpsXmlTrackerAgent"
 
+// program implements service.Interface: Start launches the scan loop in the
+// background and returns immediately; Stop cancels it and closes the state DB.
+type program struct {
+	ag       *agent.Agent
+	interval time.Duration
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+}
+
+func (p *program) Start(service.Service) error {
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		log.Printf("agente iniciando — intervalo=%s backfill=%v",
+			p.interval, os.Getenv("TRACKER_AGENT_BACKFILL") == "true")
+		p.ag.Run(p.ctx, p.interval, func(r agent.Result, err error) {
+			switch {
+			case err != nil:
+				log.Printf("scan erro: %v", err)
+			case r.Seeded:
+				log.Printf("primeira execução: cutoff de backlog gravado — arquivos anteriores ignorados; emitindo apenas novos a partir de agora")
+				fallthrough
+			default:
+				if r.New > 0 {
+					log.Printf("scan: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
+						r.Scanned, r.New, r.Emitted, r.SkippedNoChave)
+				}
+			}
+		})
+	}()
+	return nil
+}
+
+func (p *program) Stop(service.Service) error {
+	p.cancel()
+	p.wg.Wait()
+	log.Println("agente encerrado")
+	return p.ag.Close()
+}
+
+// build wires the agent from the environment. Fatal if a required var is missing.
+func (p *program) build() {
 	apiURL := mustEnv("TRACKER_API_URL")
 	secret := mustEnv("TRACKER_AGENT_SECRET")
 	arrivalRoot := mustEnv("TRACKER_AGENT_ARRIVAL_ROOT")
 	name := getenv("TRACKER_AGENT_NAME", "SRVIMPORT")
-	spool := getenv("TRACKER_AGENT_SPOOL", "agent-spool")
+	base := exeDir()
+	spool := getenv("TRACKER_AGENT_SPOOL", filepath.Join(base, "agent-spool"))
 
 	client, err := ingest.New(apiURL, name, secret, spool)
 	if err != nil {
@@ -53,37 +110,154 @@ func main() {
 	ag, err := agent.New(agent.Config{
 		Name:      name,
 		Roots:     roots,
-		StatePath: getenv("TRACKER_AGENT_STATE", "agent-state.db"),
+		StatePath: getenv("TRACKER_AGENT_STATE", filepath.Join(base, "agent-state.db")),
 		Backfill:  os.Getenv("TRACKER_AGENT_BACKFILL") == "true",
 	}, client)
 	if err != nil {
 		log.Fatalf("agent: %v", err)
 	}
-	defer ag.Close()
 
-	interval := 60 * time.Second
+	p.ag = ag
+	p.interval = 60 * time.Second
 	if v := os.Getenv("TRACKER_AGENT_SCAN_INTERVAL"); v != "" {
 		if d, e := time.ParseDuration(v); e == nil {
-			interval = d
+			p.interval = d
 		}
 	}
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+}
 
-	log.Printf("agente %q iniciando — roots=%d intervalo=%s backfill=%v",
-		name, len(roots), interval, os.Getenv("TRACKER_AGENT_BACKFILL") == "true")
-	ag.Run(ctx, interval, func(r agent.Result, err error) {
+func main() {
+	verb := ""
+	if len(os.Args) > 1 {
+		verb = os.Args[1]
+	}
+
+	svcConfig := &service.Config{
+		Name:        svcName,
+		DisplayName: "RPS XML Tracker Agent",
+		Description: "Rastreia XMLs de chegada/sincronizado (READ-ONLY) e envia observações ao tracker.",
+		Option: service.KeyValue{
+			"OnFailure":              "restart", // reinicia sozinho se o processo cair
+			"OnFailureDelayDuration": "5s",
+			"OnFailureResetPeriod":   86400, // zera a contagem de falhas após 1 dia
+		},
+	}
+	// No install, persistimos as TRACKER_* atuais no registro do serviço, para
+	// que não dependam da sessão que rodou o install.
+	if verb == "install" {
+		requireEnv("TRACKER_API_URL", "TRACKER_AGENT_SECRET", "TRACKER_AGENT_ARRIVAL_ROOT")
+		svcConfig.EnvVars = captureTrackerEnv()
+	}
+
+	prg := &program{}
+	svc, err := service.New(prg, svcConfig)
+	if err != nil {
+		log.Fatalf("service: %v", err)
+	}
+
+	if verb != "" {
+		if err := control(svc, verb); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	// Sem argumento: roda (funciona tanto como serviço do Windows quanto em
+	// primeiro plano para desenvolvimento). Como serviço, manda o log p/ arquivo.
+	setupLog()
+	prg.build()
+	if err := svc.Run(); err != nil {
+		log.Fatalf("run: %v", err)
+	}
+}
+
+// control executes a lifecycle verb against the installed service.
+func control(svc service.Service, verb string) error {
+	switch verb {
+	case "install":
+		if err := service.Control(svc, "install"); err != nil {
+			return fmt.Errorf("install: %w", err)
+		}
+		if err := service.Control(svc, "start"); err != nil {
+			return fmt.Errorf("instalado, mas falhou ao iniciar: %w", err)
+		}
+		log.Printf("serviço %q instalado e iniciado (autostart no boot, restart se cair)", svcName)
+		return nil
+	case "uninstall", "start", "stop", "restart":
+		if err := service.Control(svc, verb); err != nil {
+			return fmt.Errorf("%s: %w", verb, err)
+		}
+		log.Printf("serviço %q: %s ok", svcName, verb)
+		return nil
+	case "status":
+		st, err := svc.Status()
 		if err != nil {
-			log.Printf("scan erro: %v", err)
-			return
+			return err
 		}
-		if r.Seeded {
-			log.Printf("primeira execução: cutoff de backlog gravado — arquivos anteriores ignorados; emitindo apenas novos a partir de agora")
+		log.Printf("serviço %q: %s", svcName, statusText(st))
+		return nil
+	default:
+		return fmt.Errorf("comando desconhecido %q (use: install | uninstall | start | stop | restart | status)", verb)
+	}
+}
+
+func statusText(s service.Status) string {
+	switch s {
+	case service.StatusRunning:
+		return "rodando"
+	case service.StatusStopped:
+		return "parado"
+	default:
+		return "desconhecido (não instalado?)"
+	}
+}
+
+// setupLog redirects the standard logger to a file next to the executable when
+// running as a service (no console). Interactive runs keep logging to stderr.
+func setupLog() {
+	if service.Interactive() {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(exeDir(), "agent.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err == nil {
+		log.SetOutput(f)
+	}
+}
+
+// captureTrackerEnv snapshots every TRACKER_* var so install can persist them.
+func captureTrackerEnv() map[string]string {
+	m := map[string]string{}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "TRACKER_") {
+			continue
 		}
-		if r.New > 0 {
-			log.Printf("scan: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
-				r.Scanned, r.New, r.Emitted, r.SkippedNoChave)
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			m[k] = v
 		}
-	})
-	log.Println("agente encerrado")
+	}
+	return m
+}
+
+func exeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	return filepath.Dir(exe)
+}
+
+func requireEnv(keys ...string) {
+	var missing []string
+	for _, k := range keys {
+		if os.Getenv(k) == "" {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		log.Fatalf("install: defina estas variáveis no shell antes de instalar: %s", strings.Join(missing, ", "))
+	}
 }
 
 func mustEnv(k string) string {

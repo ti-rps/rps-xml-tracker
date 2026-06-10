@@ -153,7 +153,7 @@ func (m *Memory) Overview(_ context.Context) (model.Overview, error) {
 	return ov, nil
 }
 
-func (m *Memory) Empresas(_ context.Context, pendentesOnly bool) ([]model.EmpresaAgg, error) {
+func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	type key struct{ emp, fil int }
@@ -169,21 +169,42 @@ func (m *Memory) Empresas(_ context.Context, pendentesOnly bool) ([]model.Empres
 		k := key{*n.CodigoEmpresa, fil}
 		a := agg[k]
 		if a == nil {
-			emp, f := *n.CodigoEmpresa, fil
-			a = &model.EmpresaAgg{CodigoEmpresa: &emp, CodigoFilial: &f}
+			emp, fl := *n.CodigoEmpresa, fil
+			a = &model.EmpresaAgg{CodigoEmpresa: &emp, CodigoFilial: &fl}
 			agg[k] = a
+		}
+		if a.NomeEmpresa == "" && n.NomeEmpresa != "" {
+			a.NomeEmpresa = n.NomeEmpresa
 		}
 		addStatus(&a.StatusCounts, n.Status)
 	}
 	out := make([]model.EmpresaAgg, 0, len(agg))
 	for _, a := range agg {
-		if pendentesOnly && pendentes(a.StatusCounts) == 0 {
+		if f.PendentesOnly && pendentes(a.StatusCounts) == 0 {
 			continue
 		}
+		a.InTransit = a.Arrived + a.Synced
 		out = append(out, *a)
 	}
-	sort.SliceStable(out, func(i, j int) bool { return *out[i].CodigoEmpresa < *out[j].CodigoEmpresa })
-	return out, nil
+	if f.Sort == "pendentes" {
+		sort.SliceStable(out, func(i, j int) bool {
+			if pi, pj := pendentes(out[i].StatusCounts), pendentes(out[j].StatusCounts); pi != pj {
+				return pi > pj
+			}
+			return *out[i].CodigoEmpresa < *out[j].CodigoEmpresa
+		})
+	} else {
+		sort.SliceStable(out, func(i, j int) bool { return *out[i].CodigoEmpresa < *out[j].CodigoEmpresa })
+	}
+	total := len(out)
+	if f.Offset >= len(out) {
+		return []model.EmpresaAgg{}, total, nil
+	}
+	out = out[f.Offset:]
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
+	}
+	return out, total, nil
 }
 
 // ListNfseImport: a impl em memória não tem dados NFSe (vem do Firebird, só no Postgres).

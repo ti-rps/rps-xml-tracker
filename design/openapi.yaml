@@ -31,6 +31,14 @@ components:
       enum: [NFE, NFCE, CTE, NFS, EVENTO, UNKNOWN]
     NotaStatus:
       type: string
+      description: >
+        Estado derivado da nota. Mapeamento das etapas para as pastas/Athenas:
+        arrived = visto na pasta de chegada (A Sincronizar), aguardando sincronização;
+        synced = movido para SINCRONIZADO, aguardando importação;
+        imported = importado no Athenas (terminal, sucesso);
+        import_ignored = IMPORTACAOIGNORADA (terminal, esperado por config da empresa);
+        pending_import = conhecido no Firebird, aguardando importação;
+        stuck/lost = derivados da fase de alertas (ainda não emitidos — hoje sempre 0).
       enum: [arrived, synced, imported, import_ignored, pending_import, stuck, lost]
     Observation:           # item de ingestão enviado pelo agente
       type: object
@@ -84,10 +92,14 @@ components:
         codigo_empresa: { type: integer }
         codigo_filial:  { type: integer }
         nome:           { type: string, nullable: true }
+    # Agregado por empresa (forma FLAT, igual ao que a API retorna).
     EmpresaPendencias:
       type: object
       properties:
-        empresa:        { $ref: '#/components/schemas/EmpresaRef' }
+        codigo_empresa: { type: integer }
+        codigo_filial:  { type: integer }
+        nome_empresa:   { type: string, description: nome da empresa (TABEMPRESAS); pode vir vazio }
+        in_transit:     { type: integer, description: arrived + synced }
         arrived:        { type: integer }
         synced:         { type: integer }
         imported:       { type: integer }
@@ -143,8 +155,10 @@ paths:
         - { name: status,   in: query, schema: { $ref: '#/components/schemas/NotaStatus' } }
         - { name: doc_type, in: query, schema: { $ref: '#/components/schemas/DocType' } }
         - { name: codigo_empresa, in: query, schema: { type: integer } }
+        - { name: empresa,  in: query, schema: { type: string }, description: nome da empresa (busca parcial) }
         - { name: cnpj,     in: query, schema: { type: string }, description: emitente ou destinatário }
         - { name: q,        in: query, schema: { type: string }, description: chave de acesso (parcial/total) }
+        - { name: date_field, in: query, schema: { type: string, enum: [emissao, arrived, synced, imported] }, description: campo de data para o filtro from/to }
         - { name: from,     in: query, schema: { type: string, format: date } }
         - { name: to,       in: query, schema: { type: string, format: date } }
         - { name: limit,    in: query, schema: { type: integer, default: 50, maximum: 200 } }
@@ -173,9 +187,16 @@ paths:
 
   /empresas:
     get:
-      summary: Empresas com contagem por status (quem está pendente)
+      summary: Empresas com contagem por status (visão por empresa)
+      description: >
+        Agregado por empresa/filial: in_transit (arrived+synced), arrived, synced, imported,
+        import_ignored, pending_import, stuck, lost, e nome_empresa. Para o drill-down das notas
+        de uma empresa, use GET /notas?codigo_empresa=...&status=...
       parameters:
-        - { name: pendentes, in: query, schema: { type: boolean }, description: só empresas com itens não-terminais }
+        - { name: pendentes, in: query, schema: { type: boolean }, description: só empresas com itens não-terminais (arrived/synced/pending_import/stuck) }
+        - { name: sort, in: query, schema: { type: string, enum: [codigo, pendentes] }, description: "ordenação: 'pendentes' = mais pendentes primeiro; default por código" }
+        - { name: limit,  in: query, schema: { type: integer, default: 0 }, description: "0 = todas (sem paginação)" }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
       responses:
         '200':
           description: ok
@@ -184,8 +205,10 @@ paths:
               schema:
                 type: object
                 properties:
-                  items: { type: array, items: { $ref: '#/components/schemas/EmpresaPendencias' } }
-                  total: { type: integer }
+                  items:  { type: array, items: { $ref: '#/components/schemas/EmpresaPendencias' } }
+                  total:  { type: integer, description: nº de empresas que casam o filtro (antes do limit/offset) }
+                  limit:  { type: integer }
+                  offset: { type: integer }
 
   /nfse/import:
     get:

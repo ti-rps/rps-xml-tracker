@@ -131,6 +131,66 @@ func TestScanOnce_BackfillFalse_SeedsThenEmitsOnlyNew(t *testing.T) {
 	}
 }
 
+func TestScanOnce_SyncStageUsesDetectionTime(t *testing.T) {
+	// O mover preserva o mtime ao mover p/ SINCRONIZADO; a etapa sync deve
+	// carimbar a hora de DETECÇÃO (now), não o mtime, senão a latência dá 0.
+	root := t.TempDir()
+	write(t, root, "1100-1 ACME/nota.xml", nfeXML)
+	mtime := time.Date(2026, 6, 9, 1, 0, 0, 0, time.UTC)
+	backdate(t, root, "1100-1 ACME/nota.xml", mtime)
+
+	sink := &fakeSink{}
+	a, err := New(Config{
+		Name:      "TEST",
+		Roots:     []Root{{Path: root, Stage: model.StageSync, Event: model.EventFileMoved}},
+		StatePath: filepath.Join(t.TempDir(), "state.db"),
+		StableAge: time.Nanosecond,
+		Backfill:  true, // emite direto, sem cutoff
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	detect := time.Date(2026, 6, 10, 8, 0, 0, 0, time.UTC)
+	a.now = func() time.Time { return detect }
+
+	if _, err := a.ScanOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("emitidas %d, want 1", len(sink.got))
+	}
+	o := sink.got[0]
+	if o.Stage != model.StageSync {
+		t.Fatalf("stage=%s want sync", o.Stage)
+	}
+	if !o.ObservedAt.Equal(detect) {
+		t.Errorf("sync ObservedAt=%v, want hora de detecção %v (não o mtime %v)", o.ObservedAt, detect, mtime)
+	}
+}
+
+func TestScanOnce_ArrivalStageUsesFileMtime(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "1100-1 ACME/nota.xml", nfeXML)
+	mtime := time.Date(2026, 6, 9, 1, 0, 0, 0, time.UTC)
+	backdate(t, root, "1100-1 ACME/nota.xml", mtime)
+
+	sink := &fakeSink{}
+	a := newAgent(t, root, sink, true) // arrival root, backfill=true
+	a.now = func() time.Time { return time.Date(2026, 6, 10, 8, 0, 0, 0, time.UTC) }
+
+	if _, err := a.ScanOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.got) != 1 {
+		t.Fatalf("emitidas %d, want 1", len(sink.got))
+	}
+	if !sink.got[0].ObservedAt.Equal(mtime) {
+		t.Errorf("arrival ObservedAt=%v, want mtime do arquivo %v", sink.got[0].ObservedAt, mtime)
+	}
+}
+
 func TestSeedCutoff_PersistsAndPreventsReseed(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "1100-1 ACME/old.xml", nfeXML)

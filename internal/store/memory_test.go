@@ -82,18 +82,27 @@ func TestOverviewAndEmpresas(t *testing.T) {
 		t.Errorf("lat arrival->sync p50 = %v want 1800", ov.LatArrivalSyncP50S)
 	}
 
-	emps, err := m.Empresas(ctx, true)
+	emps, total, err := m.Empresas(ctx, EmpresaFilter{PendentesOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(emps) != 2 {
-		t.Fatalf("empresas pendentes = %d want 2", len(emps))
+	if len(emps) != 2 || total != 2 {
+		t.Fatalf("empresas pendentes = %d total=%d want 2/2", len(emps), total)
 	}
 	// sorted by codigo_empresa: 1100 then 1203
-	if *emps[0].CodigoEmpresa != 1100 || emps[0].Arrived != 1 {
+	if *emps[0].CodigoEmpresa != 1100 || emps[0].Arrived != 1 || emps[0].InTransit != 1 {
 		t.Errorf("emp[0]=%+v", emps[0])
 	}
-	if *emps[1].CodigoEmpresa != 1203 || emps[1].Synced != 1 || emps[1].Imported != 1 {
+	if *emps[1].CodigoEmpresa != 1203 || emps[1].Synced != 1 || emps[1].Imported != 1 || emps[1].InTransit != 1 {
 		t.Errorf("emp[1]=%+v", emps[1])
+	}
+
+	// paginação: limit=1 + offset=1 retorna só a 2ª empresa, mas total=2
+	page, ptotal, err := m.Empresas(ctx, EmpresaFilter{PendentesOnly: true, Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || ptotal != 2 || *page[0].CodigoEmpresa != 1203 {
+		t.Errorf("paginação inesperada: items=%d total=%d %+v", len(page), ptotal, page)
 	}
 }
