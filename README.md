@@ -50,15 +50,23 @@ TRACKER_STORE=postgres TRACKER_PG_DSN="$DSN" TRACKER_POLL_INTERVAL=30s go run ./
 # cross-compilar o .exe para o SRVIMPORT:
 GOOS=windows GOARCH=amd64 go build -o agent.exe ./cmd/agent
 ```
-No SRVIMPORT (PowerShell), com as variáveis abaixo. 1º run com `BACKFILL=false` apenas semeia o
-backlog (não emite); depois emite só o que chega.
+No SRVIMPORT (PowerShell), defina as variáveis e instale como **serviço do Windows** (sobe no boot,
+reinicia sozinho se cair, independe de sessão de login). As `TRACKER_*` são capturadas no `install`
+e gravadas no registro do serviço.
 ```powershell
 $env:TRACKER_API_URL="http://192.168.10.46:8090"
 $env:TRACKER_AGENT_SECRET="<segredo HMAC>"
 $env:TRACKER_AGENT_ARRIVAL_ROOT="F:\Xml_ASincronizar"
 $env:TRACKER_AGENT_SYNC_ROOT="F:\XML SINCRONIZADO"
-.\agent.exe
+$env:TRACKER_AGENT_BACKFILL="true"   # processa o backlog (retroativos); omita p/ só novos
+.\agent.exe install                   # instala + inicia (rode como Administrador)
+# gerência: .\agent.exe status | stop | start | restart | uninstall
 ```
+O 1º run com `BACKFILL=false` grava um cutoff e ignora o histórico (emite só o que chega a partir
+de então); com `BACKFILL=true` processa todo o backlog. Log em `agent.log` ao lado do `.exe`.
+Para rodar em primeiro plano (dev), use `.\agent.exe` sem argumento.
+Se `F:` for drive de rede mapeado, rode o serviço com uma conta que enxergue o drive (ou use UNC),
+pois o LocalSystem padrão não vê mapeamentos de usuário.
 
 ## Testes
 ```bash

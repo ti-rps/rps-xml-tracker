@@ -6,6 +6,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/kardianos/service v1.2.4
 	github.com/nakagami/firebirdsql v0.9.19
 	github.com/pressly/goose/v3 v3.27.1
 	go.etcd.io/bbolt v1.4.3
