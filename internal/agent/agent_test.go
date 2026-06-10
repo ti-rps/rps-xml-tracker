@@ -32,6 +32,15 @@ func write(t *testing.T, dir, rel, content string) {
 	}
 }
 
+// backdate sets a file's modtime so the cutoff logic is deterministic in tests.
+func backdate(t *testing.T, dir, rel string, mt time.Time) {
+	t.Helper()
+	p := filepath.Join(dir, rel)
+	if err := os.Chtimes(p, mt, mt); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newAgent(t *testing.T, root string, sink *fakeSink, backfill bool) *Agent {
 	t.Helper()
 	a, err := New(Config{
@@ -92,25 +101,76 @@ func TestScanOnce_BackfillFalse_SeedsThenEmitsOnlyNew(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "1100-1 ACME/old.xml", nfeXML) // pre-existing backlog
 
+	t0 := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	backdate(t, root, "1100-1 ACME/old.xml", t0.Add(-time.Hour)) // before the cutoff
+
 	sink := &fakeSink{}
-	a := newAgent(t, root, sink, false) // backfill=false -> first scan seeds
+	a := newAgent(t, root, sink, false) // backfill=false -> first run sets cutoff
+	a.now = func() time.Time { return t0 }
 
 	res, err := a.ScanOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !res.Seeded || res.Emitted != 0 || len(sink.got) != 0 {
-		t.Fatalf("first scan should seed without emitting: res=%+v got=%d", res, len(sink.got))
+		t.Fatalf("first run should set cutoff without emitting backlog: res=%+v got=%d", res, len(sink.got))
 	}
 
-	// a NEW file arrives after seeding -> emitted
+	// a NEW file arrives after the cutoff -> emitted on the next scan
 	write(t, root, "1100-1 ACME/new.xml",
 		`<NFe><infNFe Id="NFe35250799999999000191650010000005551000005550"><ide><mod>65</mod></ide></infNFe></NFe>`)
+	a.now = func() time.Time { return t0.Add(time.Hour) }      // advance the clock
+	backdate(t, root, "1100-1 ACME/new.xml", t0.Add(time.Minute)) // after cutoff, stable
+
 	res2, _ := a.ScanOnce(context.Background())
 	if res2.Seeded || res2.Emitted != 1 || len(sink.got) != 1 {
-		t.Fatalf("post-seed scan: res=%+v got=%d (want emitted=1)", res2, len(sink.got))
+		t.Fatalf("post-cutoff scan: res=%+v got=%d (want emitted=1)", res2, len(sink.got))
 	}
 	if sink.got[0].DocType != model.DocNFCe {
 		t.Errorf("docType=%s want NFCE", sink.got[0].DocType)
+	}
+}
+
+func TestSeedCutoff_PersistsAndPreventsReseed(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "1100-1 ACME/old.xml", nfeXML)
+	t0 := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	backdate(t, root, "1100-1 ACME/old.xml", t0.Add(-time.Hour))
+
+	statePath := filepath.Join(t.TempDir(), "state.db")
+	mk := func() *Agent {
+		a, err := New(Config{
+			Name:      "TEST",
+			Roots:     []Root{{Path: root, Stage: model.StageArrival, Event: model.EventFileSeen}},
+			StatePath: statePath,
+			StableAge: time.Nanosecond,
+		}, &fakeSink{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.now = func() time.Time { return t0 }
+		return a
+	}
+
+	a1 := mk()
+	r1, err := a1.ScanOnce(context.Background())
+	if err != nil || !r1.Seeded {
+		t.Fatalf("first run should seed: r=%+v err=%v", r1, err)
+	}
+	if cut, ok := a1.seedCutoff(); !ok || !cut.Equal(t0) {
+		t.Fatalf("cutoff not persisted: ok=%v cut=%v want %v", ok, cut, t0)
+	}
+	a1.Close()
+
+	// reopen on the SAME state file: must NOT re-seed (simulates a restart after
+	// an interrupted first scan).
+	a2 := mk()
+	defer a2.Close()
+	r2, err := a2.ScanOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.Seeded {
+		t.Fatalf("reopened agent re-seeded; persisted cutoff should make Seeded=false")
 	}
 }

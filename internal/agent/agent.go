@@ -5,8 +5,11 @@
 // antivirus; fsnotify can augment later). A bbolt state file records which files
 // were already processed (path -> size+modtime), so each scan parses only new or
 // changed files — and parsing (the expensive, AV-bound step) never touches the
-// backlog twice. With Backfill=false the first scan SEEDS the existing backlog as
-// "seen" without emitting, so the agent does not hammer the ~23M-file history.
+// backlog twice. With Backfill=false the first run records a cutoff timestamp
+// (persisted up front) and skips everything older as backlog without emitting, so
+// the agent ignores the ~23M-file history. Because the cutoff is durable, an
+// interrupted first scan never re-seeds: the next run already has the cutoff and
+// emits new files normally.
 package agent
 
 import (
@@ -116,8 +119,21 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 		// non-fatal: keep scanning; spool will retry next cycle
 	}
 
-	seeding := !a.initialized() && !a.cfg.Backfill
-	res.Seeded = seeding
+	// Seeding by cutoff timestamp: on the very first run (no cutoff stored yet,
+	// and not a backfill) record "now" as the backlog cutoff and persist it
+	// immediately — before walking. Files older than the cutoff are backlog and
+	// skipped without emitting; anything at or after it is a genuine arrival.
+	// Persisting up front means an interrupted scan (Ctrl-C, reboot, AV stall)
+	// never re-seeds: the next run already has the cutoff and emits normally.
+	cutoff, hasCutoff := a.seedCutoff()
+	firstSeed := !hasCutoff && !a.cfg.Backfill
+	if firstSeed {
+		cutoff = a.now()
+		if err := a.setSeedCutoff(cutoff); err != nil {
+			return res, err
+		}
+	}
+	res.Seeded = firstSeed
 
 	batch := make([]model.Observation, 0, a.cfg.BatchSize)
 	pending := make(map[string]fileState, flushSeenEvery) // estado a gravar em lote
@@ -187,14 +203,14 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 			if a.now().Sub(info.ModTime()) < a.cfg.StableAge {
 				return nil
 			}
+			// backlog: older than the seed cutoff -> skip without emitting.
+			if !a.cfg.Backfill && info.ModTime().Before(cutoff) {
+				return nil
+			}
 			if a.alreadySeen(path, info) {
 				return nil
 			}
 			res.New++
-
-			if seeding {
-				return record(path, info, "")
-			}
 
 			obs, chave, ok := a.parseToObservation(root, path, info)
 			if err := record(path, info, chave); err != nil {
@@ -220,9 +236,6 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 	}
 	if err := flushState(); err != nil {
 		return res, err
-	}
-	if seeding {
-		a.setInitialized()
 	}
 	return res, nil
 }
@@ -326,18 +339,29 @@ func (a *Agent) alreadySeen(path string, info fs.FileInfo) bool {
 	return seen
 }
 
-func (a *Agent) initialized() bool {
+var seedCutoffKey = []byte("seed_cutoff_unixnano")
+
+// seedCutoff returns the persisted backlog cutoff and whether one was stored.
+func (a *Agent) seedCutoff() (time.Time, bool) {
+	var t time.Time
 	var ok bool
 	_ = a.db.View(func(tx *bolt.Tx) error {
-		ok = tx.Bucket(metaBucket).Get([]byte("initialized")) != nil
+		v := tx.Bucket(metaBucket).Get(seedCutoffKey)
+		if v == nil {
+			return nil
+		}
+		if n, err := strconv.ParseInt(string(v), 10, 64); err == nil {
+			t, ok = time.Unix(0, n), true
+		}
 		return nil
 	})
-	return ok
+	return t, ok
 }
 
-func (a *Agent) setInitialized() {
-	_ = a.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(metaBucket).Put([]byte("initialized"), []byte("1"))
+// setSeedCutoff persists the backlog cutoff so the seed survives a restart.
+func (a *Agent) setSeedCutoff(t time.Time) error {
+	return a.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(metaBucket).Put(seedCutoffKey, []byte(strconv.FormatInt(t.UnixNano(), 10)))
 	})
 }
 

@@ -76,8 +76,7 @@ func main() {
 			return
 		}
 		if r.Seeded {
-			log.Printf("seed inicial do backlog: %d arquivos marcados como vistos (sem emitir)", r.New)
-			return
+			log.Printf("primeira execução: cutoff de backlog gravado — arquivos anteriores ignorados; emitindo apenas novos a partir de agora")
 		}
 		if r.New > 0 {
 			log.Printf("scan: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
