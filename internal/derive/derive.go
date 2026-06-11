@@ -42,8 +42,14 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 		if o.CodigoFilial != nil {
 			n.CodigoFilial = o.CodigoFilial
 		}
-		// metadados: primeira observação não-vazia vence (são imutáveis por nota)
-		setIfEmpty(&n.NomeEmpresa, o.NomeEmpresa)
+		// empresa (código acima e nome aqui): ÚLTIMO não-vazio vence, como o código.
+		// A qual empresa a nota é atribuída depende da linha do Firebird (selectState)
+		// e pode mudar numa correção (terceiro->dona); o nome tem de acompanhar, senão
+		// fica divergente (ex.: codigo=CLW mas nome=ROSEMBERG).
+		if o.NomeEmpresa != "" {
+			n.NomeEmpresa = o.NomeEmpresa
+		}
+		// metadados imutáveis por nota: primeira observação não-vazia vence
 		setIfEmpty(&n.CnpjEmitente, o.CnpjEmitente)
 		setIfEmpty(&n.NomeEmitente, o.NomeEmitente)
 		setIfEmpty(&n.CnpjDestinatario, o.CnpjDestinatario)

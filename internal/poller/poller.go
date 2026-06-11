@@ -111,6 +111,65 @@ func (p *Poller) PollOnce(ctx context.Context) (Result, error) {
 	return res, nil
 }
 
+// RepollResult reports the one-off retroactive correction.
+type RepollResult struct {
+	Checked      int
+	Corrected    int // resolveu p/ imported (dona) -> emitiu 'imported' corretivo
+	StillIgnored int // segue ignorada de fato (nada a fazer)
+	StillPending int // resolve p/ pendente -> NÃO corrigível por append (ver nota)
+	NotFound     int // sumiu do Athenas
+}
+
+// RepollImportIgnored re-polls notas atualmente import_ignored (terminais, fora do
+// conjunto in-flight) com a lógica nova do selectState e emite uma observação
+// 'imported' para as que hoje resolvem para a empresa dona (IMPORTADO=1). Correção
+// retroativa one-off: o re-emit de 'imported' tem dedup_key distinto do
+// 'import_ignored' antigo, então é aceito e o derive faz imported vencer (e o nome
+// da empresa passa a acompanhar o código). As que resolvem para 'pending' NÃO são
+// corrigíveis por append (import_ignored > pending_import na precedência) — entram
+// em StillPending e exigem remoção manual da observação errada.
+func (p *Poller) RepollImportIgnored(ctx context.Context) (RepollResult, error) {
+	var res RepollResult
+	chaves, err := p.st.ListChavesByStatus(ctx, model.StatusImportIgnored, 0, 0)
+	if err != nil {
+		return res, err
+	}
+	now := p.now()
+	for start := 0; start < len(chaves); start += p.batch {
+		end := start + p.batch
+		if end > len(chaves) {
+			end = len(chaves)
+		}
+		batch := chaves[start:end]
+		states, err := p.fb.Lookup(ctx, batch)
+		if err != nil {
+			return res, err
+		}
+		var obs []model.Observation
+		for _, c := range batch {
+			res.Checked++
+			st, ok := states[c]
+			switch {
+			case !ok:
+				res.NotFound++
+			case st.Importado:
+				obs = append(obs, importObs(c, model.EventImported, now, nil, st))
+				res.Corrected++
+			case st.ImportIgnorada:
+				res.StillIgnored++
+			default:
+				res.StillPending++
+			}
+		}
+		if len(obs) > 0 {
+			if _, _, err := p.st.AppendObservations(ctx, obs); err != nil {
+				return res, err
+			}
+		}
+	}
+	return res, nil
+}
+
 // Run loops PollOnce every interval until ctx is cancelled.
 func (p *Poller) Run(ctx context.Context, interval time.Duration, onResult func(Result, error)) {
 	t := time.NewTicker(interval)

@@ -217,6 +217,29 @@ func (p *Postgres) ListInflightChaves(ctx context.Context, limit int) ([]string,
 	return out, rows.Err()
 }
 
+func (p *Postgres) ListChavesByStatus(ctx context.Context, status model.NotaStatus, limit, offset int) ([]string, error) {
+	q := `SELECT chave_acesso FROM notas WHERE status = $1::nota_status ORDER BY chave_acesso`
+	args := []any{string(status)}
+	if limit > 0 {
+		args = append(args, limit, offset)
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	}
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // latencyWindow é a janela móvel dos percentis de latência do overview. Recorta
 // fora o backfill histórico (arrived_at = ModTime antigo) e dá uma leitura de SLA
 // "atual" em vez de all-time. Ajuste aqui se o produto quiser outro horizonte.

@@ -117,6 +117,26 @@ func (m *Memory) ListInflightChaves(_ context.Context, limit int) ([]string, err
 	return inflight, nil
 }
 
+func (m *Memory) ListChavesByStatus(_ context.Context, status model.NotaStatus, limit, offset int) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []string
+	for _, n := range m.allNotas() {
+		if n.Status == status {
+			out = append(out, n.ChaveAcesso)
+		}
+	}
+	sort.Strings(out) // ordem estável (allNotas itera um map)
+	if offset >= len(out) {
+		return []string{}, nil
+	}
+	out = out[offset:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (m *Memory) allNotas() []model.Nota {
 	byChave := map[string][]model.Observation{}
 	for _, o := range m.obs {

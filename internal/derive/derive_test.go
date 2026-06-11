@@ -61,6 +61,26 @@ func TestDerive_SeenPendingRanksAboveSynced(t *testing.T) {
 	}
 }
 
+func TestDerive_EmpresaNomeFollowsCodigo(t *testing.T) {
+	// correção retroativa: obs antiga (ROSEMBERG/ignorada) + obs nova (CLW/imported).
+	// imported vence, e o nome da empresa acompanha o código (não fica ROSEMBERG).
+	ign := obs(model.StageImport, model.EventImportIgnored, "2026-06-10T05:00:00Z")
+	ign.CodigoEmpresa = ptrInt(120)
+	ign.NomeEmpresa = "ROSEMBERG PEREIRA DE SOUZA"
+	imp := obs(model.StageImport, model.EventImported, "2026-06-11T08:00:00Z")
+	imp.CodigoEmpresa = ptrInt(165)
+	imp.NomeEmpresa = "CLW CHURRASCARIA LTDA"
+	n := Nota("C", []model.Observation{ign, imp})
+	if n.Status != model.StatusImported {
+		t.Fatalf("status = %s, want imported", n.Status)
+	}
+	if n.CodigoEmpresa == nil || *n.CodigoEmpresa != 165 || n.NomeEmpresa != "CLW CHURRASCARIA LTDA" {
+		t.Errorf("empresa = %v/%q, want 165/CLW (nome deve acompanhar o código)", n.CodigoEmpresa, n.NomeEmpresa)
+	}
+}
+
+func ptrInt(i int) *int { return &i }
+
 func TestDerive_ImportedBeatsPending(t *testing.T) {
 	// uma vez importada, pending_import não pode mascarar o estado terminal.
 	n := Nota("C", []model.Observation{
