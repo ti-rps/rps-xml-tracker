@@ -15,6 +15,16 @@ e **"Sincronizado"** = `synced`) e rever os rótulos (ex.: "Chegaram" → "Receb
 - Avaliar do lado backend/API apenas se vale **renomear/clarificar campos** do overview no
   contrato (`design/openapi.yaml`) antes de a UI consumir. Decisão de produto: confirmar nomes.
 
+## ✅ FEITO (2026-06-11) — selectState: 1 linha representativa por chave (multi-empresa)
+# TABLISTACHAVEACESSO tem N linhas por chave (dona + terceiros). O Lookup antigo fazia OR das
+# flags + 1ª linha não-vazia -> atribuía a nota a empresa arbitrária e um IGNORADA de terceiro
+# encerrava a nota antes de o dono importar (caso real: chave da CLW mostrada como ROSEMBERG/
+# ignorada). Novo selectState: (1) linha IMPORTADO=1 -> dona/imported; (2) senão pendente 0/0 ->
+# em trânsito (poller emite seen_pending, NÃO termina); (3) senão tudo IGNORADA -> import_ignored.
+# Desempate por menor CODIGOEMPRESA (determinístico). Provado contra o Firebird ao vivo.
+# RETROATIVO: notas já import_ignored (terminais) não são re-polladas -> precisam de re-poll
+# one-off p/ corrigir (re-emitir imported tem dedup_key diferente, então é aceito).
+
 ## ✅ FEITO (2026-06-11) — fix encoding Firebird (Latin-1 -> UTF-8)
 # Em prod, com a opção 2 ligada, o poller passou a inserir muito mais linhas e quebrou com
 # "invalid byte sequence for encoding UTF8: 0xc1..." (SQLSTATE 22021): o Firebird conecta com

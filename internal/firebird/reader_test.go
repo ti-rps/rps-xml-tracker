@@ -3,6 +3,7 @@ package firebird
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 )
 
@@ -32,10 +33,21 @@ func TestReaderLookup(t *testing.T) {
 	}
 	for _, c := range chaves {
 		st, ok := got[c]
-		t.Logf("chave=%s found=%v importado=%v tipo=%s empresa=%v/%q emit=%q/%q dest=%q data=%q",
-			c, ok, st.Importado, st.TipoDocumento, st.CodigoEmpresa, st.NomeEmpresa,
-			st.CnpjEmitente, st.NomeEmitente, st.CnpjDestinatario, st.DataEmissao)
+		t.Logf("chave=%s found=%v rows=%d -> importado=%v ignorada=%v empresa=%s/%q motivo=%q emit=%q data=%q",
+			c, ok, len(st.Rows), st.Importado, st.ImportIgnorada, codigoStr(st.CodigoEmpresa),
+			st.NomeEmpresa, st.Motivo, st.CnpjEmitente, st.DataEmissao)
+		for _, e := range st.Rows {
+			t.Logf("    linha empresa=%s/%q importado=%v ignorada=%v motivo=%q",
+				codigoStr(e.CodigoEmpresa), e.NomeEmpresa, e.Importado, e.ImportIgnorada, e.Motivo)
+		}
 	}
+}
+
+func codigoStr(p *int) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return strconv.Itoa(*p)
 }
 
 func splitEnv(s string) []string {
