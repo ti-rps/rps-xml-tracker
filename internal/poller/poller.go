@@ -9,11 +9,28 @@ package poller
 import (
 	"context"
 	"time"
+	"unicode/utf8"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/firebird"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
 )
+
+// toUTF8 garante UTF-8 válido. O Firebird do Athenas conecta com charset=NONE e
+// devolve texto em Latin-1 (bytes 0x80-0xFF crus, ex.: 0xC1='Á'), que o Postgres
+// (UTF-8) rejeita na inserção ("invalid byte sequence", SQLSTATE 22021) e derruba
+// o lote inteiro do ciclo. Se a string já é UTF-8 válida, devolve como está; senão
+// decodifica como Latin-1 (cada byte -> rune), cobrindo os acentos sem dependência.
+func toUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	r := make([]rune, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		r = append(r, rune(s[i]))
+	}
+	return string(r)
+}
 
 // reader is the read-only Firebird capability the poller needs (interface for tests).
 type reader interface {
@@ -74,7 +91,7 @@ func (p *Poller) PollOnce(ctx context.Context) (Result, error) {
 		case st.ImportIgnorada:
 			payload := map[string]any{}
 			if st.Motivo != "" {
-				payload["motivo"] = st.Motivo
+				payload["motivo"] = toUTF8(st.Motivo)
 			}
 			obs = append(obs, importObs(c, model.EventImportIgnored, now, payload, st))
 			res.Ignored++
@@ -120,14 +137,15 @@ func importObs(chave, event string, now time.Time, payload map[string]any, st fi
 		IngestedAt:  now,
 		Source:      "poller:firebird",
 		Payload:     payload,
-		// enriquece com os dados da linha do Athenas (código do cliente + partes)
+		// enriquece com os dados da linha do Athenas (código do cliente + partes).
+		// strings sanitizadas: o Firebird (charset=NONE) devolve Latin-1, inválido em UTF-8.
 		CodigoEmpresa:    st.CodigoEmpresa,
 		CodigoFilial:     st.CodigoFilial,
-		NomeEmpresa:      st.NomeEmpresa,
-		CnpjEmitente:     st.CnpjEmitente,
-		NomeEmitente:     st.NomeEmitente,
-		CnpjDestinatario: st.CnpjDestinatario,
-		NomeDestinatario: st.NomeDestinatario,
+		NomeEmpresa:      toUTF8(st.NomeEmpresa),
+		CnpjEmitente:     toUTF8(st.CnpjEmitente),
+		NomeEmitente:     toUTF8(st.NomeEmitente),
+		CnpjDestinatario: toUTF8(st.CnpjDestinatario),
+		NomeDestinatario: toUTF8(st.NomeDestinatario),
 		DataEmissao:      st.DataEmissao,
 		ValorTotal:       st.ValorTotal,
 	}

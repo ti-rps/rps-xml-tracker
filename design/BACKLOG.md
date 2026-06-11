@@ -15,6 +15,14 @@ e **"Sincronizado"** = `synced`) e rever os rótulos (ex.: "Chegaram" → "Receb
 - Avaliar do lado backend/API apenas se vale **renomear/clarificar campos** do overview no
   contrato (`design/openapi.yaml`) antes de a UI consumir. Decisão de produto: confirmar nomes.
 
+## ✅ FEITO (2026-06-11) — fix encoding Firebird (Latin-1 -> UTF-8)
+# Em prod, com a opção 2 ligada, o poller passou a inserir muito mais linhas e quebrou com
+# "invalid byte sequence for encoding UTF8: 0xc1..." (SQLSTATE 22021): o Firebird conecta com
+# charset=NONE e devolve texto Latin-1 (0xC1='Á' etc.), inválido em UTF-8, derrubando o lote
+# inteiro do ciclo. Fix: toUTF8() no poller (importObs + motivo) decodifica Latin-1 quando a
+# string não é UTF-8 válida. Não toca no reader.go (refactor on-hold). Ciclos auto-recuperam
+# (chaves seguem in-flight e voltam na rotação). Postgres não ficou com lixo (insert falhava).
+
 ## ✅ FEITO (2026-06-11) — pending_import REAL + latência sem backfill
 # pending_import era status morto (só o branch default do derive; ninguém emitia). Agora:
 # poller emite seen_pending (StageImport) quando a chave está na TABLISTACHAVEACESSO com

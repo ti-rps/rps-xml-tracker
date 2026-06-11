@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/firebird"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
@@ -74,6 +75,22 @@ func TestPollOnce_MapsStatesAndIsIdempotent(t *testing.T) {
 	}
 	if res2.Checked != 1 || res2.Imported != 0 || res2.Ignored != 0 {
 		t.Fatalf("res2 = %+v, want checked=1 imported=0 ignored=0 (idempotent)", res2)
+	}
+}
+
+func TestToUTF8(t *testing.T) {
+	// Latin-1 cru do Firebird (charset=NONE): 0xC1='Á' + 'R' -> "ÁR" UTF-8 válido.
+	got := toUTF8(string([]byte{0xc1, 0x52}))
+	if got != "ÁR" || !utf8.ValidString(got) {
+		t.Errorf("toUTF8(latin1) = %q (valid=%v), want \"ÁR\"", got, utf8.ValidString(got))
+	}
+	// já UTF-8 válido (acento multibyte) passa intacto.
+	if got := toUTF8("AÇÃO"); got != "AÇÃO" {
+		t.Errorf("toUTF8(utf8) = %q, want intacto", got)
+	}
+	// ASCII puro intacto.
+	if got := toUTF8("CLW LTDA"); got != "CLW LTDA" {
+		t.Errorf("toUTF8(ascii) = %q, want intacto", got)
 	}
 }
 
