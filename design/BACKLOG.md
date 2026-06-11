@@ -15,6 +15,17 @@ e **"Sincronizado"** = `synced`) e rever os rótulos (ex.: "Chegaram" → "Receb
 - Avaliar do lado backend/API apenas se vale **renomear/clarificar campos** do overview no
   contrato (`design/openapi.yaml`) antes de a UI consumir. Decisão de produto: confirmar nomes.
 
+## ✅ FEITO (2026-06-11) — pending_import REAL + latência sem backfill
+# pending_import era status morto (só o branch default do derive; ninguém emitia). Agora:
+# poller emite seen_pending (StageImport) quando a chave está na TABLISTACHAVEACESSO com
+# IMPORTADO=0 e não-ignorada; novo Nota.PendingAt + coluna pending_at (migration 00005);
+# precedência do derive vira imported>import_ignored>pending_import>synced>arrived;
+# ListInflightChaves passa a pollar 'pending_import' (senão a nota nunca chega a imported).
+# RECONCILIAR com o refactor on-hold do firebird (selectState caso "pendente" devolve 0/0 ->
+# o default do poller emite seen_pending; coerente, mas os dois precisam subir juntos).
+# Latência: percentis do overview agora usam JANELA MÓVEL de 30 dias (latencyWindow) sobre
+# arrived_at/synced_at -> exclui backfill histórico que inflava p50/p95. UI: rotular "últimos 30 dias".
+
 ## ✅ FEITO (2026-06-11) — Drill-down por filial + bucket "Sem empresa" (decisões do maestro)
 # Fix do 500: /empresas apontava p/ coluna inexistente `nome_empresa` (real: `empresa_nome`).
 # /notas: +codigo_filial (AND com codigo_empresa) e +sem_empresa=true (codigo_empresa IS NULL).

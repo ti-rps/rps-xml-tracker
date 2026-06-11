@@ -32,12 +32,16 @@ components:
     NotaStatus:
       type: string
       description: >
-        Estado derivado da nota. Mapeamento das etapas para as pastas/Athenas:
+        Estado derivado da nota. Mapeamento das etapas para as pastas/Athenas.
+        Precedência: imported > import_ignored > pending_import > synced > arrived.
         arrived = visto na pasta de chegada (A Sincronizar), aguardando sincronização;
-        synced = movido para SINCRONIZADO, aguardando importação;
+        synced = movido para SINCRONIZADO pelo agent (arquivo posicionado), mas o
+          Athenas AINDA NÃO o enxergou;
+        pending_import = o poller já viu a chave na TABLISTACHAVEACESSO do Athenas
+          com IMPORTADO=0 (Athenas reconheceu, falta importar) — um passo À FRENTE de
+          synced, não um sinônimo;
         imported = importado no Athenas (terminal, sucesso);
         import_ignored = IMPORTACAOIGNORADA (terminal, esperado por config da empresa);
-        pending_import = conhecido no Firebird, aguardando importação;
         stuck/lost = derivados da fase de alertas (ainda não emitidos — hoje sempre 0).
       enum: [arrived, synced, imported, import_ignored, pending_import, stuck, lost]
     Observation:           # item de ingestão enviado pelo agente
@@ -73,6 +77,7 @@ components:
         cnpj_destinatario: { type: string, nullable: true }
         arrived_at:       { type: string, format: date-time, nullable: true }
         synced_at:        { type: string, format: date-time, nullable: true }
+        pending_at:       { type: string, format: date-time, nullable: true, description: "1º avistamento no Athenas com IMPORTADO=0 (dispara status pending_import)" }
         imported_at:      { type: string, format: date-time, nullable: true }
         import_ignored:   { type: boolean }
         motivo_ignorado:  { type: string, nullable: true }
@@ -267,6 +272,9 @@ paths:
                   in_transit:      { type: integer }
                   stuck:           { type: integer }
                   lost:            { type: integer }
+                  # Percentis sobre JANELA MÓVEL de 30 dias (arrived_at p/ chegada->sync,
+                  # synced_at p/ sync->import). Exclui o backfill histórico, que inflava
+                  # os números. Rótulo honesto na UI: "últimos 30 dias".
                   lat_arrival_sync_p50_s: { type: integer, nullable: true }
                   lat_arrival_sync_p95_s: { type: integer, nullable: true }
                   lat_sync_import_p50_s:  { type: integer, nullable: true }

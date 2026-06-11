@@ -99,7 +99,7 @@ func (m *Memory) ListInflightChaves(_ context.Context, limit int) ([]string, err
 	var inflight []string
 	for chave, spans := range byChave {
 		s := derive.Nota(chave, spans).Status
-		if s == model.StatusArrived || s == model.StatusSynced {
+		if s == model.StatusArrived || s == model.StatusSynced || s == model.StatusPendingImport {
 			inflight = append(inflight, chave)
 		}
 	}

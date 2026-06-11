@@ -70,7 +70,7 @@ func main() {
 			return
 		}
 		if r.Checked > 0 {
-			log.Printf("ciclo: checadas=%d importadas=%d ignoradas=%d", r.Checked, r.Imported, r.Ignored)
+			log.Printf("ciclo: checadas=%d importadas=%d ignoradas=%d pendentes=%d", r.Checked, r.Imported, r.Ignored, r.Pending)
 		}
 	})
 	log.Println("poller encerrado")

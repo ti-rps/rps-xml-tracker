@@ -194,7 +194,7 @@ func (p *Postgres) ListInflightChaves(ctx context.Context, limit int) ([]string,
 	rows, err := p.pool.Query(ctx, `
 		WITH picked AS (
 		  SELECT chave_acesso FROM notas
-		  WHERE status IN ('arrived','synced')
+		  WHERE status IN ('arrived','synced','pending_import')
 		  ORDER BY last_polled_at ASC NULLS FIRST
 		  LIMIT $1
 		  FOR UPDATE SKIP LOCKED
@@ -216,6 +216,11 @@ func (p *Postgres) ListInflightChaves(ctx context.Context, limit int) ([]string,
 	}
 	return out, rows.Err()
 }
+
+// latencyWindow é a janela móvel dos percentis de latência do overview. Recorta
+// fora o backfill histórico (arrived_at = ModTime antigo) e dá uma leitura de SLA
+// "atual" em vez de all-time. Ajuste aqui se o produto quiser outro horizonte.
+const latencyWindow = "30 days"
 
 func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
 	var ov model.Overview
@@ -242,13 +247,23 @@ func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
 		return ov, err
 	}
 
+	// Percentis sobre uma JANELA MÓVEL (últimos 30 dias) do campo de início de
+	// cada métrica. Isso exclui o backfill histórico, cujo arrived_at é o ModTime
+	// antigo do arquivo (não uma transição chegada->sync real) e inflava o p50/p95.
+	// percentile_cont é ordered-set agg e não aceita FILTER, então cada um é uma
+	// subquery com seu próprio recorte (arrived_at p/ chegada->sync, synced_at p/
+	// sync->import). Janela tunável via latencyWindow.
 	var a50, a95, s50, s95 *float64
 	if err := p.pool.QueryRow(ctx, `SELECT
-		percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s),
-		percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s),
-		percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_sync_import_s),
-		percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_sync_import_s)
-		FROM notas`).Scan(&a50, &a95, &s50, &s95); err != nil {
+		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s)
+		   FROM notas WHERE arrived_at >= now() - $1::interval),
+		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s)
+		   FROM notas WHERE arrived_at >= now() - $1::interval),
+		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_sync_import_s)
+		   FROM notas WHERE synced_at  >= now() - $1::interval),
+		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_sync_import_s)
+		   FROM notas WHERE synced_at  >= now() - $1::interval)`,
+		latencyWindow).Scan(&a50, &a95, &s50, &s95); err != nil {
 		return ov, err
 	}
 	ov.InTransit = ov.Arrived + ov.Synced
@@ -398,7 +413,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 const notaSelect = `
 	SELECT chave_acesso, doc_type, status, codigo_empresa, codigo_filial,
-	       arrived_at, synced_at, imported_at, import_ignored, motivo_ignorado,
+	       arrived_at, synced_at, pending_at, imported_at, import_ignored, motivo_ignorado,
 	       first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
 	       cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
 	       empresa_nome
@@ -409,7 +424,7 @@ func scanNota(r rowScanner) (model.Nota, error) {
 	var motivo, cnpjE, nomeE, cnpjD, nomeD, empNome *string
 	var emissao *time.Time
 	err := r.Scan(&n.ChaveAcesso, &n.DocType, &n.Status, &n.CodigoEmpresa, &n.CodigoFilial,
-		&n.ArrivedAt, &n.SyncedAt, &n.ImportedAt, &n.ImportIgnored, &motivo,
+		&n.ArrivedAt, &n.SyncedAt, &n.PendingAt, &n.ImportedAt, &n.ImportIgnored, &motivo,
 		&n.FirstSeenAt, &n.LastUpdateAt, &n.LatArrivalSyncS, &n.LatSyncImportS,
 		&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &n.ValorTotal, &empNome)
 	if empNome != nil {
@@ -443,10 +458,11 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		   arrived_at, synced_at, imported_at, import_ignored, motivo_ignorado,
 		   first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
 		   cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
-		   empresa_nome)
+		   empresa_nome, pending_at)
 		VALUES ($1,$2::doc_type,$3::nota_status,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-		        $15,$16,$17,$18,$19::date,$20,$21)
+		        $15,$16,$17,$18,$19::date,$20,$21,$22)
 		ON CONFLICT (chave_acesso) DO UPDATE SET
+		  pending_at=EXCLUDED.pending_at,
 		  doc_type=EXCLUDED.doc_type, status=EXCLUDED.status,
 		  codigo_empresa=COALESCE(EXCLUDED.codigo_empresa, notas.codigo_empresa),
 		  codigo_filial=COALESCE(EXCLUDED.codigo_filial, notas.codigo_filial),
@@ -465,7 +481,8 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		n.ArrivedAt, n.SyncedAt, n.ImportedAt, n.ImportIgnored, nullStr(n.MotivoIgnorado),
 		n.FirstSeenAt, n.LastUpdateAt, n.LatArrivalSyncS, n.LatSyncImportS,
 		nullStr(n.CnpjEmitente), nullStr(n.NomeEmitente), nullStr(n.CnpjDestinatario),
-		nullStr(n.NomeDestinatario), nullStr(n.DataEmissao), n.ValorTotal, nullStr(n.NomeEmpresa))
+		nullStr(n.NomeDestinatario), nullStr(n.DataEmissao), n.ValorTotal, nullStr(n.NomeEmpresa),
+		n.PendingAt)
 	return err
 }
 
