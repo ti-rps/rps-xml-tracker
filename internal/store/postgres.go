@@ -127,6 +127,12 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 	if f.CodigoEmpresa != nil {
 		add("codigo_empresa = $%d", *f.CodigoEmpresa)
 	}
+	if f.CodigoFilial != nil {
+		add("codigo_filial = $%d", *f.CodigoFilial)
+	}
+	if f.SemEmpresa {
+		where = append(where, "codigo_empresa IS NULL")
+	}
 	if f.EmpresaQuery != "" {
 		add("empresa_nome ILIKE $%d", "%"+f.EmpresaQuery+"%")
 	}
@@ -258,9 +264,11 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 	if f.PendentesOnly {
 		having = "HAVING " + pend + " > 0"
 	}
-	order := "codigo_empresa, codigo_filial"
+	// Notas sem empresa identificada (codigo_empresa NULL) colapsam numa única
+	// linha "Sem empresa": fil é forçado a NULL p/ não fragmentar por filial.
+	order := "codigo_empresa, fil"
 	if f.Sort == "pendentes" {
-		order = pend + " DESC, codigo_empresa, codigo_filial"
+		order = pend + " DESC, codigo_empresa, fil"
 	}
 	args := []any{}
 	limit := ""
@@ -271,7 +279,9 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 	// count(*) OVER () é avaliado após GROUP BY/HAVING e antes do LIMIT, então dá
 	// o total de empresas que casam o filtro (para paginação).
 	q := fmt.Sprintf(`
-		SELECT codigo_empresa, codigo_filial, COALESCE(max(nome_empresa), ''),
+		SELECT codigo_empresa,
+		  CASE WHEN codigo_empresa IS NULL THEN NULL ELSE codigo_filial END AS fil,
+		  COALESCE(max(empresa_nome), ''),
 		  count(*) FILTER (WHERE status='arrived'),
 		  count(*) FILTER (WHERE status='synced'),
 		  count(*) FILTER (WHERE status='imported'),
@@ -280,8 +290,8 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 		  count(*) FILTER (WHERE status='stuck'),
 		  count(*) FILTER (WHERE status='lost'),
 		  count(*) OVER ()
-		FROM notas WHERE codigo_empresa IS NOT NULL
-		GROUP BY codigo_empresa, codigo_filial
+		FROM notas
+		GROUP BY codigo_empresa, fil
 		%s
 		ORDER BY %s
 		%s`, having, order, limit)

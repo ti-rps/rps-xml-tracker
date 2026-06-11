@@ -169,6 +169,7 @@ func (s *Server) handleListNotas(c *gin.Context) {
 	f := store.NotaFilter{
 		Status:       model.NotaStatus(c.Query("status")),
 		DocType:      model.DocType(c.Query("doc_type")),
+		SemEmpresa:   c.Query("sem_empresa") == "true",
 		EmpresaQuery: c.Query("empresa"),
 		Cnpj:         c.Query("cnpj"),
 		ChaveQuery:   c.Query("q"),
@@ -181,6 +182,11 @@ func (s *Server) handleListNotas(c *gin.Context) {
 	if v := c.Query("codigo_empresa"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			f.CodigoEmpresa = &n
+		}
+	}
+	if v := c.Query("codigo_filial"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.CodigoFilial = &n
 		}
 	}
 	items, total, err := s.st.ListNotas(c.Request.Context(), f)
