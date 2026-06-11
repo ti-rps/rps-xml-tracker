@@ -42,6 +42,7 @@ const (
 const (
 	EventFileSeen      = "file_seen"      // arquivo apareceu na chegada
 	EventFileMoved     = "file_moved"     // apareceu em SINCRONIZADO
+	EventSeenPending   = "seen_pending"   // visto no Athenas, IMPORTADO=0 (aguardando importação)
 	EventImported      = "imported"       // IMPORTADO 0->1 detectado
 	EventImportIgnored = "import_ignored" // IMPORTACAOIGNORADA=1
 )
@@ -88,6 +89,7 @@ type Nota struct {
 	ValorTotal       *float64   `json:"valor_total,omitempty"`
 	ArrivedAt        *time.Time `json:"arrived_at,omitempty"`
 	SyncedAt         *time.Time `json:"synced_at,omitempty"`
+	PendingAt        *time.Time `json:"pending_at,omitempty"` // visto no Athenas aguardando importação
 	ImportedAt       *time.Time `json:"imported_at,omitempty"`
 	ImportIgnored    bool       `json:"import_ignored"`
 	MotivoIgnorado   string     `json:"motivo_ignorado,omitempty"`

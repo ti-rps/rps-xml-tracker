@@ -40,6 +40,7 @@ type Result struct {
 	Checked  int
 	Imported int
 	Ignored  int
+	Pending  int
 }
 
 // PollOnce runs a single cycle: in-flight chaves -> Firebird -> emit observations.
@@ -77,6 +78,12 @@ func (p *Poller) PollOnce(ctx context.Context) (Result, error) {
 			}
 			obs = append(obs, importObs(c, model.EventImportIgnored, now, payload, st))
 			res.Ignored++
+		default:
+			// achada no Athenas mas IMPORTADO=0 e não ignorada -> aguardando
+			// importação. Sinal não-terminal: dedup colapsa as reemissões a
+			// cada ciclo, então pending_at fica no 1º avistamento.
+			obs = append(obs, importObs(c, model.EventSeenPending, now, nil, st))
+			res.Pending++
 		}
 	}
 	if len(obs) > 0 {

@@ -77,6 +77,39 @@ func TestPollOnce_MapsStatesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPollOnce_FoundButPendingEmitsSeenPending(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedArrival(t, st, "PENDING")
+
+	// achada no Athenas mas IMPORTADO=0 e não ignorada -> aguardando importação.
+	fr := fakeReader{states: map[string]firebird.ImportState{
+		"PENDING": {Found: true},
+	}}
+	p := New(st, fr)
+
+	res, err := p.PollOnce(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Pending != 1 || res.Imported != 0 || res.Ignored != 0 {
+		t.Fatalf("res = %+v, want pending=1 imported=0 ignored=0", res)
+	}
+	d, _, _ := st.GetNota(ctx, "PENDING")
+	if d.Status != model.StatusPendingImport || d.PendingAt == nil {
+		t.Errorf("PENDING status=%s pendingAt=%v, want pending_import", d.Status, d.PendingAt)
+	}
+
+	// a nota pendente CONTINUA in-flight (não-terminal) e a reemissão é idempotente.
+	res2, err := p.PollOnce(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Checked != 1 {
+		t.Fatalf("res2 = %+v, want checked=1 (pending segue sendo pollada)", res2)
+	}
+}
+
 // TestPollOnce_LiveFirebird seeds a known imported chave's arrival and verifies a
 // real poll cycle marks it imported. Runs only with TRACKER_TEST_FB_DSN +
 // TRACKER_TEST_FB_CHAVE (a chave known to be IMPORTADO=1 in Athenas).

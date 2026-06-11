@@ -42,6 +42,36 @@ func TestDerive_FullHappyPath(t *testing.T) {
 	}
 }
 
+func TestDerive_SeenPendingRanksAboveSynced(t *testing.T) {
+	// arquivo sincronizado (agent) + visto no Athenas aguardando (poller):
+	// pending_import vence synced, e arrived continua registrado.
+	n := Nota("C", []model.Observation{
+		obs(model.StageArrival, model.EventFileSeen, "2026-06-08T09:00:00Z"),
+		obs(model.StageSync, model.EventFileMoved, "2026-06-08T09:30:00Z"),
+		obs(model.StageImport, model.EventSeenPending, "2026-06-08T09:45:00Z"),
+	})
+	if n.Status != model.StatusPendingImport {
+		t.Fatalf("status = %s, want pending_import", n.Status)
+	}
+	if n.PendingAt == nil || n.SyncedAt == nil || n.ArrivedAt == nil {
+		t.Fatal("expected arrived/synced/pending all set")
+	}
+	if n.ImportedAt != nil || n.ImportIgnored {
+		t.Error("seen_pending não é terminal: não deve setar imported/ignored")
+	}
+}
+
+func TestDerive_ImportedBeatsPending(t *testing.T) {
+	// uma vez importada, pending_import não pode mascarar o estado terminal.
+	n := Nota("C", []model.Observation{
+		obs(model.StageImport, model.EventSeenPending, "2026-06-08T09:45:00Z"),
+		obs(model.StageImport, model.EventImported, "2026-06-08T10:00:00Z"),
+	})
+	if n.Status != model.StatusImported {
+		t.Fatalf("status = %s, want imported", n.Status)
+	}
+}
+
 func TestDerive_ImportIgnoredIsTerminalNotStuck(t *testing.T) {
 	o := obs(model.StageImport, model.EventImportIgnored, "2026-06-08T10:00:00Z")
 	o.Payload = map[string]any{"motivo": "Empresa usa tela de Pre-Importacao"}

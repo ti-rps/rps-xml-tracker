@@ -64,6 +64,8 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 				if m, ok := o.Payload["motivo"].(string); ok {
 					n.MotivoIgnorado = m
 				}
+			case model.EventSeenPending:
+				setIfEarlier(&n.PendingAt, o.ObservedAt)
 			default: // imported
 				setIfEarlier(&n.ImportedAt, o.ObservedAt)
 			}
@@ -76,13 +78,22 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 	return n
 }
 
-// status applies the precedence: imported > import_ignored > synced > arrived.
+// status applies the precedence:
+//
+//	imported > import_ignored > pending_import > synced > arrived
+//
+// pending_import (visto no Athenas via poller, IMPORTADO=0) rankeia ACIMA de
+// synced (arquivo posicionado pelo agent): a nota progrediu — o Athenas já a
+// enxergou e só falta importar. O default final continua pending_import como
+// fallback para a observação degenerada (stage desconhecido).
 func status(n model.Nota) model.NotaStatus {
 	switch {
 	case n.ImportedAt != nil:
 		return model.StatusImported
 	case n.ImportIgnored:
 		return model.StatusImportIgnored
+	case n.PendingAt != nil:
+		return model.StatusPendingImport
 	case n.SyncedAt != nil:
 		return model.StatusSynced
 	case n.ArrivedAt != nil:
