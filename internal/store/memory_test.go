@@ -106,3 +106,67 @@ func TestOverviewAndEmpresas(t *testing.T) {
 		t.Errorf("paginação inesperada: items=%d total=%d %+v", len(page), ptotal, page)
 	}
 }
+
+func TestEmpresas_SemEmpresaBucket(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	at := time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC)
+	// Duas notas sem empresa (codigo_empresa nil) + uma com empresa.
+	semEmp := model.Observation{
+		ChaveAcesso: "X", Stage: model.StageArrival, EventType: model.EventFileSeen,
+		ObservedAt: at, DocType: model.DocNFe, Source: "t",
+	}
+	semEmp2 := semEmp
+	semEmp2.ChaveAcesso = "Y"
+	_, _, _ = m.AppendObservations(ctx, []model.Observation{
+		semEmp, semEmp2,
+		obsFor("Z", model.StageArrival, model.EventFileSeen, at, 1203),
+	})
+
+	emps, total, err := m.Empresas(ctx, EmpresaFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 1203 + 1 bucket "sem empresa" = 2 linhas; bucket colapsa X e Y numa só.
+	if len(emps) != 2 || total != 2 {
+		t.Fatalf("empresas=%d total=%d want 2/2: %+v", len(emps), total, emps)
+	}
+	// bucket "sem empresa" ordena por último (codigo nil).
+	bucket := emps[len(emps)-1]
+	if bucket.CodigoEmpresa != nil || bucket.CodigoFilial != nil {
+		t.Errorf("bucket sem empresa deveria ter codigo nil: %+v", bucket)
+	}
+	if bucket.Arrived != 2 {
+		t.Errorf("bucket sem empresa arrived=%d want 2 (X+Y colapsados)", bucket.Arrived)
+	}
+
+	// drill-down: sem_empresa=true retorna só X e Y.
+	_, semTotal, err := m.ListNotas(ctx, NotaFilter{SemEmpresa: true})
+	if err != nil || semTotal != 2 {
+		t.Errorf("sem_empresa drill-down total=%d err=%v want 2", semTotal, err)
+	}
+}
+
+func TestListNotas_CodigoFilial(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemory()
+	at := time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC)
+	mk := func(chave string, fil int) model.Observation {
+		return model.Observation{
+			ChaveAcesso: chave, Stage: model.StageArrival, EventType: model.EventFileSeen,
+			ObservedAt: at, DocType: model.DocNFe, Source: "t",
+			CodigoEmpresa: ptr(1203), CodigoFilial: ptr(fil),
+		}
+	}
+	_, _, _ = m.AppendObservations(ctx, []model.Observation{mk("A", 1), mk("B", 2), mk("C", 2)})
+
+	// codigo_empresa + codigo_filial combinam via AND.
+	_, total, err := m.ListNotas(ctx, NotaFilter{CodigoEmpresa: ptr(1203), CodigoFilial: ptr(2)})
+	if err != nil || total != 2 {
+		t.Errorf("filial 2 total=%d err=%v want 2", total, err)
+	}
+	_, total, _ = m.ListNotas(ctx, NotaFilter{CodigoEmpresa: ptr(1203), CodigoFilial: ptr(1)})
+	if total != 1 {
+		t.Errorf("filial 1 total=%d want 1", total)
+	}
+}

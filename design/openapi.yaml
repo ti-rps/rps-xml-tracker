@@ -95,10 +95,15 @@ components:
     # Agregado por empresa (forma FLAT, igual ao que a API retorna).
     EmpresaPendencias:
       type: object
+      description: >
+        Uma linha por (codigo_empresa, codigo_filial). A linha "Sem empresa" (notas com
+        codigo_empresa nulo) vem com codigo_empresa e codigo_filial AUSENTES (omitempty, não
+        serializa null) e nome_empresa ausente — detecte por codigo_empresa == null no cliente.
+        Para o drill-down dela use GET /notas?sem_empresa=true.
       properties:
-        codigo_empresa: { type: integer }
-        codigo_filial:  { type: integer }
-        nome_empresa:   { type: string, description: nome da empresa (TABEMPRESAS); pode vir vazio }
+        codigo_empresa: { type: integer, description: ausente na linha "Sem empresa" }
+        codigo_filial:  { type: integer, description: ausente quando nulo (filial não derivada) ou na linha "Sem empresa" }
+        nome_empresa:   { type: string, description: nome da empresa (max() lexical entre as notas); ausente quando vazio }
         in_transit:     { type: integer, description: arrived + synced }
         arrived:        { type: integer }
         synced:         { type: integer }
@@ -155,6 +160,8 @@ paths:
         - { name: status,   in: query, schema: { $ref: '#/components/schemas/NotaStatus' } }
         - { name: doc_type, in: query, schema: { $ref: '#/components/schemas/DocType' } }
         - { name: codigo_empresa, in: query, schema: { type: integer } }
+        - { name: codigo_filial,  in: query, schema: { type: integer }, description: "filial exata; combina com codigo_empresa (AND)" }
+        - { name: sem_empresa, in: query, schema: { type: boolean }, description: "true = só notas sem empresa identificada (codigo_empresa nulo); drill-down da linha \"Sem empresa\"" }
         - { name: empresa,  in: query, schema: { type: string }, description: nome da empresa (busca parcial) }
         - { name: cnpj,     in: query, schema: { type: string }, description: emitente ou destinatário }
         - { name: q,        in: query, schema: { type: string }, description: chave de acesso (parcial/total) }

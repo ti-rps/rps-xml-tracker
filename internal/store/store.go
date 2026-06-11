@@ -58,6 +58,8 @@ type NotaFilter struct {
 	Status        model.NotaStatus
 	DocType       model.DocType
 	CodigoEmpresa *int
+	CodigoFilial  *int   // filtra a filial exata (combina com CodigoEmpresa via AND)
+	SemEmpresa    bool   // só notas sem empresa identificada (codigo_empresa IS NULL)
 	EmpresaQuery  string // LIKE em empresa_nome
 	Cnpj          string // LIKE em cnpj_emitente OU cnpj_destinatario
 	ChaveQuery    string // partial/full chave

@@ -156,22 +156,36 @@ func (m *Memory) Overview(_ context.Context) (model.Overview, error) {
 func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	type key struct{ emp, fil int }
+	type key struct {
+		emp, fil       int
+		hasEmp, hasFil bool
+	}
 	agg := map[key]*model.EmpresaAgg{}
 	for _, n := range m.allNotas() {
+		// Notas sem empresa colapsam numa única linha "Sem empresa" (emp/fil NULL).
+		var k key
+		var a *model.EmpresaAgg
 		if n.CodigoEmpresa == nil {
-			continue
-		}
-		fil := 0
-		if n.CodigoFilial != nil {
-			fil = *n.CodigoFilial
-		}
-		k := key{*n.CodigoEmpresa, fil}
-		a := agg[k]
-		if a == nil {
-			emp, fl := *n.CodigoEmpresa, fil
-			a = &model.EmpresaAgg{CodigoEmpresa: &emp, CodigoFilial: &fl}
-			agg[k] = a
+			k = key{}
+			if agg[k] == nil {
+				agg[k] = &model.EmpresaAgg{}
+			}
+			a = agg[k]
+		} else {
+			k = key{emp: *n.CodigoEmpresa, hasEmp: true}
+			if n.CodigoFilial != nil {
+				k.fil, k.hasFil = *n.CodigoFilial, true
+			}
+			a = agg[k]
+			if a == nil {
+				emp := *n.CodigoEmpresa
+				a = &model.EmpresaAgg{CodigoEmpresa: &emp}
+				if n.CodigoFilial != nil {
+					fl := *n.CodigoFilial
+					a.CodigoFilial = &fl
+				}
+				agg[k] = a
+			}
 		}
 		if a.NomeEmpresa == "" && n.NomeEmpresa != "" {
 			a.NomeEmpresa = n.NomeEmpresa
@@ -191,10 +205,12 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 			if pi, pj := pendentes(out[i].StatusCounts), pendentes(out[j].StatusCounts); pi != pj {
 				return pi > pj
 			}
-			return *out[i].CodigoEmpresa < *out[j].CodigoEmpresa
+			return codigoLess(out[i].CodigoEmpresa, out[j].CodigoEmpresa)
 		})
 	} else {
-		sort.SliceStable(out, func(i, j int) bool { return *out[i].CodigoEmpresa < *out[j].CodigoEmpresa })
+		sort.SliceStable(out, func(i, j int) bool {
+			return codigoLess(out[i].CodigoEmpresa, out[j].CodigoEmpresa)
+		})
 	}
 	total := len(out)
 	if f.Offset >= len(out) {
@@ -235,6 +251,18 @@ func pendentes(c model.StatusCounts) int {
 	return c.Arrived + c.Synced + c.Stuck + c.PendingImport
 }
 
+// codigoLess ordena códigos com nil por último (espelha NULLS LAST do Postgres),
+// pondo a linha "Sem empresa" no fim.
+func codigoLess(a, b *int) bool {
+	if a == nil {
+		return false
+	}
+	if b == nil {
+		return true
+	}
+	return *a < *b
+}
+
 func pctl(v []int64, p float64) *int64 {
 	if len(v) == 0 {
 		return nil
@@ -266,6 +294,12 @@ func matches(n model.Nota, f NotaFilter) bool {
 		return false
 	}
 	if f.CodigoEmpresa != nil && (n.CodigoEmpresa == nil || *n.CodigoEmpresa != *f.CodigoEmpresa) {
+		return false
+	}
+	if f.CodigoFilial != nil && (n.CodigoFilial == nil || *n.CodigoFilial != *f.CodigoFilial) {
+		return false
+	}
+	if f.SemEmpresa && n.CodigoEmpresa != nil {
 		return false
 	}
 	if f.EmpresaQuery != "" && !containsFold(n.NomeEmpresa, f.EmpresaQuery) {
