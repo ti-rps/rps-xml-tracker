@@ -102,7 +102,7 @@ func TestRepollImportIgnored_CorrectsMisattributed(t *testing.T) {
 	fr := fakeReader{states: map[string]firebird.ImportState{
 		"CLW": {Found: true, Importado: true, CodigoEmpresa: ptr(165), NomeEmpresa: "CLW CHURRASCARIA LTDA"},
 	}}
-	res, err := New(st, fr).RepollImportIgnored(ctx)
+	res, err := New(st, fr).RepollImportIgnored(ctx, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +116,59 @@ func TestRepollImportIgnored_CorrectsMisattributed(t *testing.T) {
 	}
 	if d.CodigoEmpresa == nil || *d.CodigoEmpresa != 165 || d.NomeEmpresa != "CLW CHURRASCARIA LTDA" {
 		t.Errorf("empresa=%v/%q want 165/CLW (não ROSEMBERG)", d.CodigoEmpresa, d.NomeEmpresa)
+	}
+}
+
+func TestRepollImportIgnored_FixPendingRevertsToPending(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	// nota presa em import_ignored por um TERCEIRO, mas a dona ainda não importou.
+	seedArrival(t, st, "PEND")
+	_, _, err := st.AppendObservations(ctx, []model.Observation{
+		{ChaveAcesso: "PEND", Stage: model.StageSync, EventType: model.EventFileMoved,
+			ObservedAt: time.Date(2026, 6, 9, 9, 0, 0, 0, time.UTC), Source: "agent:test"},
+		{ChaveAcesso: "PEND", Stage: model.StageImport, EventType: model.EventImportIgnored,
+			ObservedAt: time.Date(2026, 6, 10, 5, 0, 0, 0, time.UTC), Source: "poller:firebird",
+			CodigoEmpresa: ptr(120), NomeEmpresa: "TERCEIRO", Payload: map[string]any{"motivo": "de terceiros"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _, _ := st.GetNota(ctx, "PEND"); d.Status != model.StatusImportIgnored {
+		t.Fatalf("pré: status=%s want import_ignored", d.Status)
+	}
+
+	// Firebird resolve p/ pendente (dona 0/0, ninguém importou).
+	fr := fakeReader{states: map[string]firebird.ImportState{
+		"PEND": {Found: true, CodigoEmpresa: ptr(165), NomeEmpresa: "DONA LTDA"},
+	}}
+
+	// sem fix: não toca, conta StillPending.
+	res, _ := New(st, fr).RepollImportIgnored(ctx, false)
+	if res.StillPending != 1 || res.FixedPending != 0 {
+		t.Fatalf("sem fix: res=%+v want StillPending=1", res)
+	}
+	if d, _, _ := st.GetNota(ctx, "PEND"); d.Status != model.StatusImportIgnored {
+		t.Errorf("sem fix não deveria mudar; status=%s", d.Status)
+	}
+
+	// com fix: remove a import_ignored errada + emite seen_pending -> pending_import.
+	res, err = New(st, fr).RepollImportIgnored(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.FixedPending != 1 {
+		t.Fatalf("com fix: res=%+v want FixedPending=1", res)
+	}
+	d, _, _ := st.GetNota(ctx, "PEND")
+	if d.Status != model.StatusPendingImport {
+		t.Errorf("status=%s want pending_import", d.Status)
+	}
+	if d.ImportIgnored {
+		t.Error("a observação import_ignored deveria ter sido removida")
+	}
+	if d.CodigoEmpresa == nil || *d.CodigoEmpresa != 165 {
+		t.Errorf("empresa=%v want 165 (dona, não terceiro 120)", d.CodigoEmpresa)
 	}
 }
 

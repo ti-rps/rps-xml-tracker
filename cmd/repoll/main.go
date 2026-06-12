@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 
@@ -24,6 +25,12 @@ import (
 )
 
 func main() {
+	// --fix-pending: além de corrigir as que viraram imported, REMOVE a observação
+	// import_ignored errada (de terceiro) das que hoje resolvem p/ pendente, fazendo-as
+	// voltar a aguardando importação. DESTRUTIVO (apaga observações) — opt-in explícito.
+	fixPending := flag.Bool("fix-pending", false, "também corrige as presas em ignorada que na verdade estão pendentes (remove a observação errada)")
+	flag.Parse()
+
 	ctx := context.Background()
 
 	fbDSN := os.Getenv("TRACKER_FB_DSN")
@@ -47,15 +54,19 @@ func main() {
 	}
 	defer pg.Close()
 
-	log.Println("repoll: re-pollando notas import_ignored com a lógica selectState...")
-	res, err := poller.New(pg, rd).RepollImportIgnored(ctx)
+	mode := "padrão (append-only)"
+	if *fixPending {
+		mode = "--fix-pending (remove import_ignored errada das pendentes)"
+	}
+	log.Printf("repoll: re-pollando notas import_ignored com a lógica selectState [%s]...", mode)
+	res, err := poller.New(pg, rd).RepollImportIgnored(ctx, *fixPending)
 	if err != nil {
 		log.Fatalf("repoll: %v (parcial: %+v)", err, res)
 	}
-	log.Printf("repoll concluído: checadas=%d corrigidas=%d (->imported) ainda_ignoradas=%d ainda_pendentes=%d sumidas=%d",
-		res.Checked, res.Corrected, res.StillIgnored, res.StillPending, res.NotFound)
+	log.Printf("repoll concluído: checadas=%d corrigidas=%d (->imported) corrigidas_pendentes=%d (->pending_import) ainda_ignoradas=%d ainda_pendentes=%d sumidas=%d",
+		res.Checked, res.Corrected, res.FixedPending, res.StillIgnored, res.StillPending, res.NotFound)
 	if res.StillPending > 0 {
-		log.Printf("ATENÇÃO: %d notas resolvem p/ pendente e NÃO foram corrigidas por append "+
-			"(import_ignored > pending_import). Exigem remoção manual da observação import_ignored errada.", res.StillPending)
+		log.Printf("ATENÇÃO: %d notas resolvem p/ pendente e NÃO foram corrigidas (rode com --fix-pending "+
+			"para removê-las da ignorada e devolvê-las a aguardando importação).", res.StillPending)
 	}
 }

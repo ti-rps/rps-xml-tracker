@@ -240,6 +240,38 @@ func (p *Postgres) ListChavesByStatus(ctx context.Context, status model.NotaStat
 	return out, rows.Err()
 }
 
+func (p *Postgres) DeleteImportIgnoredObs(ctx context.Context, chave string) (int, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM observations WHERE chave_acesso=$1 AND stage='import'::stage AND event_type=$2`,
+		chave, model.EventImportIgnored)
+	if err != nil {
+		return 0, err
+	}
+	n := int(tag.RowsAffected())
+	if n > 0 {
+		// recomputa a nota a partir das observações restantes (volta a synced).
+		spans, err := loadObservations(ctx, tx, chave)
+		if err != nil {
+			return 0, err
+		}
+		if len(spans) > 0 {
+			if err := upsertNota(ctx, tx, derive.Nota(chave, spans)); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // latencyWindow é a janela móvel dos percentis de latência do overview. Recorta
 // fora o backfill histórico (arrived_at = ModTime antigo) e dá uma leitura de SLA
 // "atual" em vez de all-time. Ajuste aqui se o produto quiser outro horizonte.
