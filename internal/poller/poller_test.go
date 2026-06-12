@@ -25,6 +25,8 @@ func (f fakeReader) Lookup(_ context.Context, chaves []string) (map[string]fireb
 	return out, nil
 }
 
+func ptr(i int) *int { return &i }
+
 func seedArrival(t *testing.T, st store.Store, chave string) {
 	t.Helper()
 	_, _, err := st.AppendObservations(context.Background(), []model.Observation{{
@@ -75,6 +77,45 @@ func TestPollOnce_MapsStatesAndIsIdempotent(t *testing.T) {
 	}
 	if res2.Checked != 1 || res2.Imported != 0 || res2.Ignored != 0 {
 		t.Fatalf("res2 = %+v, want checked=1 imported=0 ignored=0 (idempotent)", res2)
+	}
+}
+
+func TestRepollImportIgnored_CorrectsMisattributed(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	// nota que ficou import_ignored (terceiro ROSEMBERG ignorou antes da dona).
+	seedArrival(t, st, "CLW")
+	_, _, err := st.AppendObservations(ctx, []model.Observation{{
+		ChaveAcesso: "CLW", Stage: model.StageImport, EventType: model.EventImportIgnored,
+		ObservedAt: time.Date(2026, 6, 10, 5, 0, 0, 0, time.UTC), Source: "poller:firebird",
+		CodigoEmpresa: ptr(120), NomeEmpresa: "ROSEMBERG PEREIRA DE SOUZA",
+		Payload: map[string]any{"motivo": "nota de terceiros"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, _, _ := st.GetNota(ctx, "CLW"); d.Status != model.StatusImportIgnored {
+		t.Fatalf("pré-condição: status=%s want import_ignored", d.Status)
+	}
+
+	// agora o Firebird resolve para a dona (CLW, IMPORTADO=1).
+	fr := fakeReader{states: map[string]firebird.ImportState{
+		"CLW": {Found: true, Importado: true, CodigoEmpresa: ptr(165), NomeEmpresa: "CLW CHURRASCARIA LTDA"},
+	}}
+	res, err := New(st, fr).RepollImportIgnored(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Checked != 1 || res.Corrected != 1 {
+		t.Fatalf("res = %+v, want checked=1 corrigidas=1", res)
+	}
+	// imported vence import_ignored, e empresa (código E nome) acompanha a correção.
+	d, _, _ := st.GetNota(ctx, "CLW")
+	if d.Status != model.StatusImported {
+		t.Errorf("status=%s want imported", d.Status)
+	}
+	if d.CodigoEmpresa == nil || *d.CodigoEmpresa != 165 || d.NomeEmpresa != "CLW CHURRASCARIA LTDA" {
+		t.Errorf("empresa=%v/%q want 165/CLW (não ROSEMBERG)", d.CodigoEmpresa, d.NomeEmpresa)
 	}
 }
 

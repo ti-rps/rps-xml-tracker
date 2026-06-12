@@ -24,6 +24,12 @@ e **"Sincronizado"** = `synced`) e rever os rótulos (ex.: "Chegaram" → "Receb
 # Desempate por menor CODIGOEMPRESA (determinístico). Provado contra o Firebird ao vivo.
 # RETROATIVO: notas já import_ignored (terminais) não são re-polladas -> precisam de re-poll
 # one-off p/ corrigir (re-emitir imported tem dedup_key diferente, então é aceito).
+# -> FEITO: cmd/repoll (tracker-repoll) + store.ListChavesByStatus + poller.RepollImportIgnored.
+# Roda 1x: re-polla as import_ignored, emite 'imported' p/ as que resolvem p/ a dona (IMPORTADO=1).
+# As que resolvem p/ pendente NÃO são corrigíveis por append (import_ignored > pending_import) ->
+# reportadas em StillPending p/ remoção manual. derive: nome da empresa agora é último-não-vazio
+# (acompanha o código numa correção; antes era setIfEmpty -> ficava ROSEMBERG com código CLW).
+# Prod: docker compose run --rm tracker-poller tracker-repoll
 
 ## ✅ FEITO (2026-06-11) — fix encoding Firebird (Latin-1 -> UTF-8)
 # Em prod, com a opção 2 ligada, o poller passou a inserir muito mais linhas e quebrou com

@@ -26,6 +26,10 @@ type Store interface {
 	// not yet imported/import_ignored), for the chave-driven Firebird poller.
 	ListInflightChaves(ctx context.Context, limit int) ([]string, error)
 
+	// ListChavesByStatus returns chaves whose derived status equals the given one
+	// (limit<=0 = todas). Para o re-poll one-off de notas terminais.
+	ListChavesByStatus(ctx context.Context, status model.NotaStatus, limit, offset int) ([]string, error)
+
 	// Overview returns the dashboard summary cards.
 	Overview(ctx context.Context) (model.Overview, error)
 
