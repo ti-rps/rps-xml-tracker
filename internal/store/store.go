@@ -30,6 +30,12 @@ type Store interface {
 	// (limit<=0 = todas). Para o re-poll one-off de notas terminais.
 	ListChavesByStatus(ctx context.Context, status model.NotaStatus, limit, offset int) ([]string, error)
 
+	// DeleteImportIgnoredObs removes a chave's import_ignored observations and
+	// recomputes the nota. DESTRUTIVO: usado só na correção retroativa de notas
+	// erradamente terminais (terceiro ignorou antes de a dona importar). Retorna
+	// quantas observações removeu.
+	DeleteImportIgnoredObs(ctx context.Context, chave string) (int, error)
+
 	// Overview returns the dashboard summary cards.
 	Overview(ctx context.Context) (model.Overview, error)
 

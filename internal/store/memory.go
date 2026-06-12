@@ -137,6 +137,23 @@ func (m *Memory) ListChavesByStatus(_ context.Context, status model.NotaStatus, 
 	return out, nil
 }
 
+func (m *Memory) DeleteImportIgnoredObs(_ context.Context, chave string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	out := m.obs[:0]
+	for _, o := range m.obs {
+		if o.ChaveAcesso == chave && o.Stage == model.StageImport && o.EventType == model.EventImportIgnored {
+			delete(m.seen, DedupKey(o)) // mantém o set de dedup coerente
+			n++
+			continue
+		}
+		out = append(out, o)
+	}
+	m.obs = out
+	return n, nil // notas são derivadas na leitura — nada a recomputar
+}
+
 func (m *Memory) allNotas() []model.Nota {
 	byChave := map[string][]model.Observation{}
 	for _, o := range m.obs {

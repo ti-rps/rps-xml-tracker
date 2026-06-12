@@ -30,6 +30,11 @@ e **"Sincronizado"** = `synced`) e rever os rótulos (ex.: "Chegaram" → "Receb
 # reportadas em StillPending p/ remoção manual. derive: nome da empresa agora é último-não-vazio
 # (acompanha o código numa correção; antes era setIfEmpty -> ficava ROSEMBERG com código CLW).
 # Prod: docker compose run --rm tracker-poller tracker-repoll
+# -> +MODO --fix-pending (destrutivo, opt-in): para as que resolvem p/ pendente (terceiro
+# ignorou, dona não importou), REMOVE a observação import_ignored errada (store.DeleteImportIgnoredObs)
+# e emite seen_pending -> volta a pending_import. 1ª passada em prod (2026-06-12): de 9459 ignoradas,
+# 2442 corrigidas->imported, 3649 ignoradas de fato, 3368 pendentes-presas (alvo do --fix-pending).
+# Prod: docker compose run --rm tracker-poller tracker-repoll --fix-pending
 
 ## ✅ FEITO (2026-06-11) — fix encoding Firebird (Latin-1 -> UTF-8)
 # Em prod, com a opção 2 ligada, o poller passou a inserir muito mais linhas e quebrou com

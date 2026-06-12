@@ -116,19 +116,22 @@ type RepollResult struct {
 	Checked      int
 	Corrected    int // resolveu p/ imported (dona) -> emitiu 'imported' corretivo
 	StillIgnored int // segue ignorada de fato (nada a fazer)
-	StillPending int // resolve p/ pendente -> NÃO corrigível por append (ver nota)
+	StillPending int // resolve p/ pendente e fixPending=false -> não tocada
+	FixedPending int // resolve p/ pendente e fixPending=true -> import_ignored removida + seen_pending
 	NotFound     int // sumiu do Athenas
 }
 
 // RepollImportIgnored re-polls notas atualmente import_ignored (terminais, fora do
-// conjunto in-flight) com a lógica nova do selectState e emite uma observação
-// 'imported' para as que hoje resolvem para a empresa dona (IMPORTADO=1). Correção
-// retroativa one-off: o re-emit de 'imported' tem dedup_key distinto do
-// 'import_ignored' antigo, então é aceito e o derive faz imported vencer (e o nome
-// da empresa passa a acompanhar o código). As que resolvem para 'pending' NÃO são
-// corrigíveis por append (import_ignored > pending_import na precedência) — entram
-// em StillPending e exigem remoção manual da observação errada.
-func (p *Poller) RepollImportIgnored(ctx context.Context) (RepollResult, error) {
+// conjunto in-flight) com a lógica nova do selectState. Correção retroativa one-off:
+//
+//   - resolve p/ a dona (IMPORTADO=1) -> emite 'imported' (dedup_key distinto do
+//     'import_ignored', então é aceito; o derive faz imported vencer).
+//   - resolve p/ pendente: se fixPending=true, REMOVE a observação import_ignored
+//     errada (destrutivo) e emite seen_pending -> a nota vira pending_import; se
+//     fixPending=false, só conta em StillPending (append não corrige porque
+//     import_ignored > pending_import na precedência).
+//   - tudo ignorado de fato -> no-op.
+func (p *Poller) RepollImportIgnored(ctx context.Context, fixPending bool) (RepollResult, error) {
 	var res RepollResult
 	chaves, err := p.st.ListChavesByStatus(ctx, model.StatusImportIgnored, 0, 0)
 	if err != nil {
@@ -157,6 +160,14 @@ func (p *Poller) RepollImportIgnored(ctx context.Context) (RepollResult, error) 
 				res.Corrected++
 			case st.ImportIgnorada:
 				res.StillIgnored++
+			case fixPending:
+				// pendente de fato (dona ainda não importou): a import_ignored era de
+				// terceiro. Remove a observação errada e emite seen_pending.
+				if _, err := p.st.DeleteImportIgnoredObs(ctx, c); err != nil {
+					return res, err
+				}
+				obs = append(obs, importObs(c, model.EventSeenPending, now, nil, st))
+				res.FixedPending++
 			default:
 				res.StillPending++
 			}
