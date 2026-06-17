@@ -81,6 +81,7 @@ func (s *Server) routes() {
 	read.GET("/notas", s.handleListNotas)
 	read.GET("/notas/:chave", s.handleGetNota)
 	read.GET("/metrics/overview", s.handleOverview)
+	read.GET("/metrics/timeseries", s.handleTimeseries)
 	read.GET("/empresas", s.handleEmpresas)
 	read.GET("/nfse/import", s.handleNfseImport)
 }
@@ -92,6 +93,25 @@ func (s *Server) handleOverview(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, ov)
+}
+
+func (s *Server) handleTimeseries(c *gin.Context) {
+	days, ok := map[string]int{"7d": 7, "30d": 30, "90d": 90}[c.DefaultQuery("range", "30d")]
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "range inválido (use 7d|30d|90d)"})
+		return
+	}
+	bucket := c.DefaultQuery("bucket", "day")
+	if bucket != "day" && bucket != "week" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bucket inválido (use day|week)"})
+		return
+	}
+	ts, err := s.st.Timeseries(c.Request.Context(), store.TimeseriesFilter{RangeDays: days, Bucket: bucket})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular timeseries"})
+		return
+	}
+	c.JSON(http.StatusOK, ts)
 }
 
 func (s *Server) handleEmpresas(c *gin.Context) {

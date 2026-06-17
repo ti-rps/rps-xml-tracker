@@ -142,7 +142,13 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 		where = append(where, fmt.Sprintf("(cnpj_emitente LIKE $%d OR cnpj_destinatario LIKE $%d)", len(args), len(args)))
 	}
 	if f.ChaveQuery != "" {
-		add("chave_acesso LIKE $%d", "%"+f.ChaveQuery+"%")
+		if isCompleteChave(f.ChaveQuery) {
+			// Chave completa (44 dígitos) -> match exato na PRIMARY KEY (instantâneo),
+			// em vez de LIKE '%...%', cujo curinga à esquerda forçaria seq scan.
+			add("chave_acesso = $%d", f.ChaveQuery)
+		} else {
+			add("chave_acesso LIKE $%d", "%"+f.ChaveQuery+"%")
+		}
 	}
 	if col := dateColumn(f.DateField); col != "" {
 		if f.From != "" {
@@ -182,6 +188,22 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 		items = append(items, n)
 	}
 	return items, total, rows.Err()
+}
+
+// isCompleteChave reports whether s looks like a full 44-digit access key. When it
+// does, ListNotas hits the PRIMARY KEY with `=` instead of a leading-wildcard LIKE
+// (which would seq-scan the whole table), making the common "paste a chave" search
+// instantaneous. Partial input still falls back to the trigram-backed LIKE.
+func isCompleteChave(s string) bool {
+	if len(s) != 44 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ListInflightChaves returns the LEAST-recently-polled in-flight chaves and
@@ -277,6 +299,10 @@ func (p *Postgres) DeleteImportIgnoredObs(ctx context.Context, chave string) (in
 // "atual" em vez de all-time. Ajuste aqui se o produto quiser outro horizonte.
 const latencyWindow = "30 days"
 
+// tzSaoPaulo é o fuso de bucketização da série temporal (mesma decisão do dashboard
+// do maestro). Constante — interpolada direto no SQL sem risco de injeção.
+const tzSaoPaulo = "America/Sao_Paulo"
+
 func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
 	var ov model.Overview
 	rows, err := p.pool.Query(ctx, `SELECT status, count(*) FROM notas GROUP BY status`)
@@ -325,6 +351,95 @@ func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
 	ov.LatArrivalSyncP50S, ov.LatArrivalSyncP95S = f2i(a50), f2i(a95)
 	ov.LatSyncImportP50S, ov.LatSyncImportP95S = f2i(s50), f2i(s95)
 	return ov, nil
+}
+
+func (p *Postgres) Timeseries(ctx context.Context, f TimeseriesFilter) (model.Timeseries, error) {
+	ts := model.Timeseries{
+		Range:   fmt.Sprintf("%dd", f.RangeDays),
+		Bucket:  f.Bucket,
+		TZ:      tzSaoPaulo,
+		Buckets: []model.TimeseriesBucket{},
+	}
+	// unit/step vêm de um whitelist (handler valida) -> seguro interpolar no SQL.
+	unit, step := "day", "1 day"
+	if f.Bucket == "week" {
+		unit, step = "week", "1 week"
+	}
+	// spine = todos os buckets do range (date_trunc no fuso local), LEFT JOIN com os
+	// agregados -> série contínua. Contagens por evento (arrived_at/synced_at/imported_at);
+	// import_ignored = notas com status atual import_ignored, datadas pelo observed_at do
+	// evento de ignore. Latências = percentis por coorte (chegada->sync por quem chegou no
+	// bucket; sync->import por quem sincronizou). $1=dias, $2=event_type do ignore.
+	q := fmt.Sprintf(`
+WITH spine AS (
+  SELECT generate_series(
+           date_trunc('%[1]s', (now() AT TIME ZONE '%[3]s') - make_interval(days => $1 - 1)),
+           date_trunc('%[1]s', (now() AT TIME ZONE '%[3]s')),
+           interval '%[2]s'
+         )::date AS b
+),
+arr AS (
+  SELECT date_trunc('%[1]s', (arrived_at AT TIME ZONE '%[3]s'))::date AS b,
+         count(*) AS n,
+         percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s) AS p50,
+         percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s) AS p95
+  FROM notas WHERE arrived_at >= now() - make_interval(days => $1 + 7) GROUP BY 1
+),
+syn AS (
+  SELECT date_trunc('%[1]s', (synced_at AT TIME ZONE '%[3]s'))::date AS b,
+         count(*) AS n,
+         percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_sync_import_s) AS p50,
+         percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_sync_import_s) AS p95
+  FROM notas WHERE synced_at >= now() - make_interval(days => $1 + 7) GROUP BY 1
+),
+imp AS (
+  SELECT date_trunc('%[1]s', (imported_at AT TIME ZONE '%[3]s'))::date AS b, count(*) AS n
+  FROM notas WHERE imported_at >= now() - make_interval(days => $1 + 7) GROUP BY 1
+),
+ign AS (
+  SELECT date_trunc('%[1]s', (o.observed_at AT TIME ZONE '%[3]s'))::date AS b,
+         count(DISTINCT o.chave_acesso) AS n
+  FROM observations o
+  JOIN notas n ON n.chave_acesso = o.chave_acesso AND n.status = 'import_ignored'::nota_status
+  WHERE o.stage = 'import'::stage AND o.event_type = $2
+    AND o.observed_at >= now() - make_interval(days => $1 + 7)
+  GROUP BY 1
+)
+SELECT s.b,
+       COALESCE(arr.n,0), COALESCE(syn.n,0), COALESCE(imp.n,0), COALESCE(ign.n,0),
+       arr.p50, arr.p95, syn.p50, syn.p95
+FROM spine s
+LEFT JOIN arr ON arr.b = s.b
+LEFT JOIN syn ON syn.b = s.b
+LEFT JOIN imp ON imp.b = s.b
+LEFT JOIN ign ON ign.b = s.b
+ORDER BY s.b`, unit, step, tzSaoPaulo)
+
+	rows, err := p.pool.Query(ctx, q, f.RangeDays, model.EventImportIgnored)
+	if err != nil {
+		return ts, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b time.Time
+		var arrived, synced, imported, ignored int
+		var a50, a95, s50, s95 *float64
+		if err := rows.Scan(&b, &arrived, &synced, &imported, &ignored, &a50, &a95, &s50, &s95); err != nil {
+			return ts, err
+		}
+		ts.Buckets = append(ts.Buckets, model.TimeseriesBucket{
+			Date:               b.Format("2006-01-02"),
+			Arrived:            arrived,
+			Synced:             synced,
+			Imported:           imported,
+			ImportIgnored:      ignored,
+			LatArrivalSyncP50S: f2i(a50),
+			LatArrivalSyncP95S: f2i(a95),
+			LatSyncImportP50S:  f2i(s50),
+			LatSyncImportP95S:  f2i(s95),
+		})
+	}
+	return ts, rows.Err()
 }
 
 func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
