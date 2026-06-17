@@ -129,6 +129,33 @@ type Overview struct {
 	LatSyncImportP95S  *int64 `json:"lat_sync_import_p95_s,omitempty"`
 }
 
+// TimeseriesBucket is one time bucket (day or week) of pipeline evolution for the
+// Painel v2 line charts. Counts são fluxo-por-evento: arrived/synced/imported = notas
+// cujo arrived_at/synced_at/imported_at caiu no bucket; import_ignored = notas com
+// status atual import_ignored, datadas pelo observed_at do evento de ignore. Latências
+// são percentis (segundos) por coorte de evento (chegada->sync chaveada por quem chegou
+// no bucket; sync->import por quem sincronizou), nil quando não há amostra.
+type TimeseriesBucket struct {
+	Date               string `json:"date"` // YYYY-MM-DD (America/Sao_Paulo); semana = segunda-feira
+	Arrived            int    `json:"arrived"`
+	Synced             int    `json:"synced"`
+	Imported           int    `json:"imported"`
+	ImportIgnored      int    `json:"import_ignored"`
+	LatArrivalSyncP50S *int64 `json:"lat_arrival_sync_p50_s"` // sempre presente (null sem amostra) p/ gap na linha
+	LatArrivalSyncP95S *int64 `json:"lat_arrival_sync_p95_s"`
+	LatSyncImportP50S  *int64 `json:"lat_sync_import_p50_s"`
+	LatSyncImportP95S  *int64 `json:"lat_sync_import_p95_s"`
+}
+
+// Timeseries is the time-bucketed pipeline evolution (Painel v2). A série é contínua:
+// todo bucket do range aparece, com contagens zeradas e latências null quando vazio.
+type Timeseries struct {
+	Range   string             `json:"range"`  // 7d|30d|90d
+	Bucket  string             `json:"bucket"` // day|week
+	TZ      string             `json:"tz"`     // America/Sao_Paulo
+	Buckets []TimeseriesBucket `json:"buckets"`
+}
+
 // EmpresaAgg is the per-empresa status breakdown (quem está pendente).
 type EmpresaAgg struct {
 	CodigoEmpresa *int   `json:"codigo_empresa,omitempty"`

@@ -39,6 +39,10 @@ type Store interface {
 	// Overview returns the dashboard summary cards.
 	Overview(ctx context.Context) (model.Overview, error)
 
+	// Timeseries returns time-bucketed pipeline flow + latency percentiles for the
+	// Painel v2 charts (série contínua, zero-fill nas contagens, nil nas latências).
+	Timeseries(ctx context.Context, f TimeseriesFilter) (model.Timeseries, error)
+
 	// Empresas returns the per-empresa status breakdown. total is the number of
 	// empresas matching the filter (before limit/offset), for pagination.
 	Empresas(ctx context.Context, f EmpresaFilter) (items []model.EmpresaAgg, total int, err error)
@@ -53,6 +57,12 @@ type EmpresaFilter struct {
 	Sort          string // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
 	Limit         int    // <=0 retorna todas (sem paginação)
 	Offset        int
+}
+
+// TimeseriesFilter holds the timeseries query params (já validados no handler).
+type TimeseriesFilter struct {
+	RangeDays int    // 7 | 30 | 90 (echo no response como "%dd")
+	Bucket    string // "day" | "week"
 }
 
 // NfseFilter holds the supported NFSe list filters.

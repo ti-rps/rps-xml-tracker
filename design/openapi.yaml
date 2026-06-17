@@ -280,9 +280,51 @@ paths:
                   lat_sync_import_p50_s:  { type: integer, nullable: true }
                   lat_sync_import_p95_s:  { type: integer, nullable: true }
 
+  /metrics/timeseries:
+    get:
+      summary: Série temporal da evolução do pipeline (Painel v2 — gráficos de linha de volume e latência por dia/semana)
+      description: >
+        Fluxo-por-evento: arrived/synced/imported contam notas cujo arrived_at/synced_at/imported_at
+        caiu no bucket; import_ignored conta notas com status atual import_ignored, datadas pelo
+        observed_at do evento de ignore (reconcilia com o card de /metrics/overview; exclui as
+        corrigidas via --fix-pending). Latências são percentis (segundos) por coorte de evento
+        (chegada->sync chaveada por quem chegou no bucket; sync->import por quem sincronizou) —
+        os dias mais recentes podem ser parciais (censura à direita das coortes ainda em trânsito).
+        Bucketização em America/Sao_Paulo. Série contínua: todo bucket do range aparece, com
+        contagens zeradas e latências null quando não há dado.
+      parameters:
+        - { name: range,  in: query, schema: { type: string, enum: [7d, 30d, 90d], default: 30d } }
+        - { name: bucket, in: query, schema: { type: string, enum: [day, week], default: day } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  range:  { type: string, example: 30d }
+                  bucket: { type: string, example: day }
+                  tz:     { type: string, example: America/Sao_Paulo }
+                  buckets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        date:           { type: string, format: date, description: "YYYY-MM-DD (fuso local); semana = segunda-feira" }
+                        arrived:        { type: integer }
+                        synced:         { type: integer }
+                        imported:       { type: integer }
+                        import_ignored: { type: integer }
+                        lat_arrival_sync_p50_s: { type: integer, nullable: true }
+                        lat_arrival_sync_p95_s: { type: integer, nullable: true }
+                        lat_sync_import_p50_s:  { type: integer, nullable: true }
+                        lat_sync_import_p95_s:  { type: integer, nullable: true }
+        '400': { description: range ou bucket inválido }
+
   /metrics/throughput:
     get:
-      summary: Série temporal (notas por etapa por bucket) para gráficos
+      summary: "(placeholder antigo, não implementado — use /metrics/timeseries) Série temporal por etapa"
       parameters:
         - { name: bucket, in: query, schema: { type: string, enum: [hour, day], default: hour } }
         - { name: from,   in: query, schema: { type: string, format: date-time } }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -188,6 +189,94 @@ func (m *Memory) Overview(_ context.Context) (model.Overview, error) {
 	ov.LatArrivalSyncP50S, ov.LatArrivalSyncP95S = pctl(arr, 0.50), pctl(arr, 0.95)
 	ov.LatSyncImportP50S, ov.LatSyncImportP95S = pctl(syn, 0.50), pctl(syn, 0.95)
 	return ov, nil
+}
+
+func (m *Memory) Timeseries(_ context.Context, f TimeseriesFilter) (model.Timeseries, error) {
+	ts := model.Timeseries{
+		Range:   fmt.Sprintf("%dd", f.RangeDays),
+		Bucket:  f.Bucket,
+		TZ:      "America/Sao_Paulo",
+		Buckets: []model.TimeseriesBucket{},
+	}
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		loc = time.UTC
+	}
+	week := f.Bucket == "week"
+	key := func(t time.Time) string { return bucketStart(t, week, loc).Format("2006-01-02") }
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	arrN, synN, impN, ignN := map[string]int{}, map[string]int{}, map[string]int{}, map[string]int{}
+	arrLat, synLat := map[string][]int64{}, map[string][]int64{}
+	for _, n := range m.allNotas() {
+		if n.ArrivedAt != nil {
+			k := key(*n.ArrivedAt)
+			arrN[k]++
+			if n.LatArrivalSyncS != nil {
+				arrLat[k] = append(arrLat[k], *n.LatArrivalSyncS)
+			}
+		}
+		if n.SyncedAt != nil {
+			k := key(*n.SyncedAt)
+			synN[k]++
+			if n.LatSyncImportS != nil {
+				synLat[k] = append(synLat[k], *n.LatSyncImportS)
+			}
+		}
+		if n.ImportedAt != nil {
+			impN[key(*n.ImportedAt)]++
+		}
+		// import_ignored: status atual ignored, datado pelo observed_at do evento de ignore.
+		if n.Status == model.StatusImportIgnored {
+			for _, o := range m.spansFor(n.ChaveAcesso) {
+				if o.Stage == model.StageImport && o.EventType == model.EventImportIgnored {
+					ignN[key(o.ObservedAt)]++ // conta a chave 1x
+					break
+				}
+			}
+		}
+	}
+
+	// spine contínua: do bucket mais antigo do range até o de hoje (fuso local).
+	now := time.Now().In(loc)
+	start := bucketStart(now.AddDate(0, 0, -(f.RangeDays - 1)), week, loc)
+	end := bucketStart(now, week, loc)
+	step := func(t time.Time) time.Time { return t.AddDate(0, 0, 1) }
+	if week {
+		step = func(t time.Time) time.Time { return t.AddDate(0, 0, 7) }
+	}
+	for b := start; !b.After(end); b = step(b) {
+		k := b.Format("2006-01-02")
+		ts.Buckets = append(ts.Buckets, model.TimeseriesBucket{
+			Date:               k,
+			Arrived:            arrN[k],
+			Synced:             synN[k],
+			Imported:           impN[k],
+			ImportIgnored:      ignN[k],
+			LatArrivalSyncP50S: pctl(append([]int64(nil), arrLat[k]...), 0.50),
+			LatArrivalSyncP95S: pctl(append([]int64(nil), arrLat[k]...), 0.95),
+			LatSyncImportP50S:  pctl(append([]int64(nil), synLat[k]...), 0.50),
+			LatSyncImportP95S:  pctl(append([]int64(nil), synLat[k]...), 0.95),
+		})
+	}
+	return ts, nil
+}
+
+// bucketStart trunca t para o início do bucket (dia ou semana ISO/segunda) no fuso loc.
+// Espelha date_trunc('day'|'week', ...) do Postgres, que usa segunda como início de semana.
+func bucketStart(t time.Time, week bool, loc *time.Location) time.Time {
+	t = t.In(loc)
+	y, mo, d := t.Date()
+	day := time.Date(y, mo, d, 0, 0, 0, 0, loc)
+	if week {
+		wd := int(day.Weekday()) // domingo=0
+		if wd == 0 {
+			wd = 7
+		}
+		day = day.AddDate(0, 0, -(wd - 1)) // recua até segunda
+	}
+	return day
 }
 
 func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
