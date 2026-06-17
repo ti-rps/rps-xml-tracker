@@ -142,7 +142,13 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 		where = append(where, fmt.Sprintf("(cnpj_emitente LIKE $%d OR cnpj_destinatario LIKE $%d)", len(args), len(args)))
 	}
 	if f.ChaveQuery != "" {
-		add("chave_acesso LIKE $%d", "%"+f.ChaveQuery+"%")
+		if isCompleteChave(f.ChaveQuery) {
+			// Chave completa (44 dígitos) -> match exato na PRIMARY KEY (instantâneo),
+			// em vez de LIKE '%...%', cujo curinga à esquerda forçaria seq scan.
+			add("chave_acesso = $%d", f.ChaveQuery)
+		} else {
+			add("chave_acesso LIKE $%d", "%"+f.ChaveQuery+"%")
+		}
 	}
 	if col := dateColumn(f.DateField); col != "" {
 		if f.From != "" {
@@ -182,6 +188,22 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 		items = append(items, n)
 	}
 	return items, total, rows.Err()
+}
+
+// isCompleteChave reports whether s looks like a full 44-digit access key. When it
+// does, ListNotas hits the PRIMARY KEY with `=` instead of a leading-wildcard LIKE
+// (which would seq-scan the whole table), making the common "paste a chave" search
+// instantaneous. Partial input still falls back to the trigram-backed LIKE.
+func isCompleteChave(s string) bool {
+	if len(s) != 44 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ListInflightChaves returns the LEAST-recently-polled in-flight chaves and
