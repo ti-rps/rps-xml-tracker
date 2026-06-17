@@ -163,10 +163,33 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 		clause = " WHERE " + strings.Join(where, " AND ")
 	}
 
-	var total int
-	if err := p.pool.QueryRow(ctx, `SELECT count(*) FROM notas`+clause, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	// total: na `notas` (14M linhas) o count(*) exato sem filtro é ~7s (seq/index
+	// scan da tabela inteira), pago a cada listagem. Sem filtro -> ESTIMATIVA via
+	// pg_class.reltuples (instantânea; o número exato não importa pra paginação da
+	// UI). Com filtro -> count exato (o índice/filtro corta o conjunto). Roda em
+	// PARALELO com a query da página (leituras independentes; pgxpool é concorrente),
+	// então o tempo de parede vira max(total, página) em vez da soma — antes eram
+	// dois scans sequenciais do mesmo conjunto.
+	noFilter := len(where) == 0
+	countArgs := append([]any(nil), args...) // snapshot antes do append de limit/offset (evita race)
+	type totalRes struct {
+		n   int
+		err error
 	}
+	totalCh := make(chan totalRes, 1)
+	go func() {
+		var t int
+		var e error
+		if noFilter {
+			e = p.pool.QueryRow(ctx, `SELECT reltuples::bigint FROM pg_class WHERE relname = 'notas'`).Scan(&t)
+		} else {
+			e = p.pool.QueryRow(ctx, `SELECT count(*) FROM notas`+clause, countArgs...).Scan(&t)
+		}
+		if t < 0 { // reltuples = -1 quando a tabela nunca foi ANALYZEd
+			t = 0
+		}
+		totalCh <- totalRes{t, e}
+	}()
 
 	limit := f.Limit
 	if limit <= 0 {
@@ -176,6 +199,7 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 	q := notaSelect + clause + fmt.Sprintf(" ORDER BY last_update_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args))
 	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
+		<-totalCh // drena o goroutine antes de sair
 		return nil, 0, err
 	}
 	defer rows.Close()
@@ -183,11 +207,20 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 	for rows.Next() {
 		n, err := scanNota(rows)
 		if err != nil {
+			<-totalCh
 			return nil, 0, err
 		}
 		items = append(items, n)
 	}
-	return items, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		<-totalCh
+		return nil, 0, err
+	}
+	tr := <-totalCh
+	if tr.err != nil {
+		return nil, 0, tr.err
+	}
+	return items, tr.n, nil
 }
 
 // isCompleteChave reports whether s looks like a full 44-digit access key. When it
