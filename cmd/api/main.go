@@ -53,18 +53,26 @@ func main() {
 		log.Fatalf("store: valor inválido para TRACKER_STORE")
 	}
 
-	// Cache dos agregados do dashboard (overview/empresas/timeseries): a query
-	// roda no máx 1x/TTL por chave, refreshs concorrentes não empilham. TTL via
-	// TRACKER_DASHBOARD_CACHE_TTL (default 30s); "0" desliga.
-	ttl := 30 * time.Second
+	// Cache dos agregados do dashboard (overview/empresas/timeseries): valor servido
+	// na hora + refresh em background. As queries custam ~10s (scan de 14M), então um
+	// TTL maior reduz o nº de refreshs pesados; dado de monitoramento pode ficar ~1min
+	// atrasado. TTL via TRACKER_DASHBOARD_CACHE_TTL (default 60s); "0" desliga.
+	ttl := 60 * time.Second
 	if v := os.Getenv("TRACKER_DASHBOARD_CACHE_TTL"); v != "" {
 		if d, e := time.ParseDuration(v); e == nil {
 			ttl = d
 		}
 	}
 	if ttl > 0 {
-		st = store.NewCached(st, ttl)
+		cached := store.NewCached(st, ttl)
+		st = cached
 		log.Printf("cache do dashboard: TTL=%s", ttl)
+		// Aquece os agregados em background ao subir, pra o 1º acesso já achar tudo
+		// em cache (sem cold-start lento). Serializado internamente (não afoga o banco).
+		go func() {
+			cached.Warm(context.Background())
+			log.Println("cache do dashboard: aquecido")
+		}()
 	}
 
 	srv := api.New(st, cfg)
