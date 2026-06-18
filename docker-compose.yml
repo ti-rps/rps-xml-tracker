@@ -9,6 +9,11 @@ services:
   tracker-postgres:
     image: postgres:15-alpine
     container_name: tracker_postgres
+    # /dev/shm: o default do Docker (64M) estoura em ops paralelas sobre a notas (14M
+    # linhas) — VACUUM paralelo e count(*) paralelo de buscas amplas precisam de um
+    # segmento DSM > 64M e falham com "could not resize shared memory segment ...
+    # No space left on device". 1g é cap em tmpfs (RAM sob demanda), não reserva fixa.
+    shm_size: "1gb"
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
