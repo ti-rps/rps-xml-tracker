@@ -279,6 +279,41 @@ func bucketStart(t time.Time, week bool, loc *time.Location) time.Time {
 	return day
 }
 
+func (m *Memory) DocTypes(_ context.Context) ([]model.DocTypeCount, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	counts := map[model.DocType]int{}
+	for _, n := range m.allNotas() {
+		counts[n.DocType]++
+	}
+	out := make([]model.DocTypeCount, 0, len(counts))
+	for d, c := range counts {
+		out = append(out, model.DocTypeCount{DocType: d, Count: c})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Count > out[j].Count })
+	return out, nil
+}
+
+func (m *Memory) BacklogAge(_ context.Context) ([]model.BacklogBucket, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now()
+	counts := map[string]int{}
+	for _, n := range m.allNotas() {
+		switch n.Status {
+		case model.StatusArrived, model.StatusSynced, model.StatusPendingImport:
+		default:
+			continue
+		}
+		ref := n.ArrivedAt
+		if ref == nil {
+			ref = &n.FirstSeenAt
+		}
+		counts[model.BacklogBucketOf(now.Sub(*ref))]++
+	}
+	return orderedBacklog(counts), nil
+}
+
 func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -321,6 +356,9 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 	out := make([]model.EmpresaAgg, 0, len(agg))
 	for _, a := range agg {
 		if f.PendentesOnly && pendentes(a.StatusCounts) == 0 {
+			continue
+		}
+		if f.Query != "" && !containsFold(a.NomeEmpresa, f.Query) {
 			continue
 		}
 		a.InTransit = a.Arrived + a.Synced

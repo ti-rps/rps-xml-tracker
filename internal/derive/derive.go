@@ -79,6 +79,7 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 	}
 
 	n.Status = status(n)
+	n.NumeroNota = model.NumeroNota(chave)
 	n.LatArrivalSyncS = diffSeconds(n.ArrivedAt, n.SyncedAt)
 	n.LatSyncImportS = diffSeconds(n.SyncedAt, n.ImportedAt)
 	return n

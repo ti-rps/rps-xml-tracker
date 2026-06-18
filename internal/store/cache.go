@@ -48,6 +48,28 @@ func (c *Cached) Warm(ctx context.Context) {
 	}
 	_, _, _ = c.Empresas(ctx, EmpresaFilter{}) // tab Empresas (todas)
 	_, _, _ = c.Empresas(ctx, EmpresaFilter{PendentesOnly: true, Sort: "pendentes"})
+	_, _ = c.DocTypes(ctx)
+	_, _ = c.BacklogAge(ctx)
+}
+
+func (c *Cached) DocTypes(ctx context.Context) ([]model.DocTypeCount, error) {
+	v, err := c.get("doctypes", func(cctx context.Context) (any, error) {
+		return c.Store.DocTypes(cctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.([]model.DocTypeCount), nil
+}
+
+func (c *Cached) BacklogAge(ctx context.Context) ([]model.BacklogBucket, error) {
+	v, err := c.get("backlog_age", func(cctx context.Context) (any, error) {
+		return c.Store.BacklogAge(cctx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.([]model.BacklogBucket), nil
 }
 
 // get serve o dashboard sem nunca bloquear (exceto o primeiríssimo cálculo por
@@ -127,7 +149,12 @@ type empresasResult struct {
 }
 
 func (c *Cached) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
-	key := fmt.Sprintf("empresas|%t|%s|%d|%d", f.PendentesOnly, f.Sort, f.Limit, f.Offset)
+	// Busca por nome é rápida (trigram corta o conjunto) e tem cardinalidade alta de
+	// chaves — passa direto, sem cachear (evita inflar o mapa do cache).
+	if f.Query != "" {
+		return c.Store.Empresas(ctx, f)
+	}
+	key := fmt.Sprintf("empresas|%t|%s|%s|%d|%d", f.PendentesOnly, f.Query, f.Sort, f.Limit, f.Offset)
 	v, err := c.get(key, func(cctx context.Context) (any, error) {
 		items, total, e := c.Store.Empresas(cctx, f)
 		if e != nil {

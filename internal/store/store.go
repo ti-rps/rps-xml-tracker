@@ -43,6 +43,13 @@ type Store interface {
 	// Painel v2 charts (série contínua, zero-fill nas contagens, nil nas latências).
 	Timeseries(ctx context.Context, f TimeseriesFilter) (model.Timeseries, error)
 
+	// DocTypes returns nota counts grouped by doc_type (gráfico de distribuição).
+	DocTypes(ctx context.Context) ([]model.DocTypeCount, error)
+
+	// BacklogAge returns how many pending (non-terminal) notas fall in each age
+	// bucket since arrival (notas presas na fila). Faixas em model.BacklogBuckets.
+	BacklogAge(ctx context.Context) ([]model.BacklogBucket, error)
+
 	// Empresas returns the per-empresa status breakdown. total is the number of
 	// empresas matching the filter (before limit/offset), for pagination.
 	Empresas(ctx context.Context, f EmpresaFilter) (items []model.EmpresaAgg, total int, err error)
@@ -54,6 +61,7 @@ type Store interface {
 // EmpresaFilter holds the supported per-empresa aggregation filters.
 type EmpresaFilter struct {
 	PendentesOnly bool   // só empresas com itens não-terminais (arrived/synced/pending_import/stuck)
+	Query         string // busca por nome da empresa (ILIKE); vazio = todas
 	Sort          string // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
 	Limit         int    // <=0 retorna todas (sem paginação)
 	Offset        int

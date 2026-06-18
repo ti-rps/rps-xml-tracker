@@ -70,6 +70,7 @@ components:
       type: object
       properties:
         chave_acesso:     { type: string }
+        numero_nota:      { type: string, description: "nNF (número da nota), derivado da chave; ausente p/ NFSe" }
         doc_type:         { $ref: '#/components/schemas/DocType' }
         status:           { $ref: '#/components/schemas/NotaStatus' }
         empresa:          { $ref: '#/components/schemas/EmpresaRef' }
@@ -206,6 +207,7 @@ paths:
         de uma empresa, use GET /notas?codigo_empresa=...&status=...
       parameters:
         - { name: pendentes, in: query, schema: { type: boolean }, description: só empresas com itens não-terminais (arrived/synced/pending_import/stuck) }
+        - { name: q, in: query, schema: { type: string }, description: "busca por nome da empresa (parcial, case-insensitive)" }
         - { name: sort, in: query, schema: { type: string, enum: [codigo, pendentes] }, description: "ordenação: 'pendentes' = mais pendentes primeiro; default por código" }
         - { name: limit,  in: query, schema: { type: integer, default: 0 }, description: "0 = todas (sem paginação)" }
         - { name: offset, in: query, schema: { type: integer, default: 0 } }
@@ -321,6 +323,48 @@ paths:
                         lat_sync_import_p50_s:  { type: integer, nullable: true }
                         lat_sync_import_p95_s:  { type: integer, nullable: true }
         '400': { description: range ou bucket inválido }
+
+  /metrics/doctypes:
+    get:
+      summary: Distribuição de notas por tipo de documento (NFe/NFCe/CTe/...)
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        doc_type: { $ref: '#/components/schemas/DocType' }
+                        count:    { type: integer }
+
+  /metrics/backlog-age:
+    get:
+      summary: Notas pendentes por faixa de idade desde a chegada (notas presas na fila)
+      description: >
+        Faixas fixas (<1h, 1-6h, 6-24h, 1-3d, 3-7d, >7d), sempre todas presentes (0 quando vazia),
+        sobre notas não-terminais (arrived/synced/pending_import). Idade = now − arrived_at
+        (COALESCE com first_seen_at). Útil p/ ver notas presas aguardando sincronização.
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        label: { type: string, example: "1-6h" }
+                        count: { type: integer }
 
   /metrics/throughput:
     get:

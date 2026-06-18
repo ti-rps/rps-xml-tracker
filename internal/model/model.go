@@ -1,7 +1,20 @@
 // Package model defines the core domain types shared across the tracker.
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// NumeroNota extrai o número da nota (tag <nNF> do XML) da chave de acesso: nas 44
+// posições da chave NFe/NFCe/CTe, o nNF são os 9 dígitos nas posições 26–34, sem
+// zeros à esquerda. Retorna "" se a chave não tiver 44 dígitos (ex.: NFSe).
+func NumeroNota(chave string) string {
+	if len(chave) != 44 {
+		return ""
+	}
+	return strings.TrimLeft(chave[25:34], "0")
+}
 
 // DocType is the authoritative document type, derived from the agent's XML parse
 // (Firebird's TIPODOCUMENTO is unreliable — see Fase 0 findings).
@@ -76,6 +89,7 @@ type Observation struct {
 // Nota is the derived state for a single chave (NFe/NFCe/CTe).
 type Nota struct {
 	ChaveAcesso      string     `json:"chave_acesso"`
+	NumeroNota       string     `json:"numero_nota,omitempty"` // nNF, derivado da chave
 	DocType          DocType    `json:"doc_type"`
 	Status           NotaStatus `json:"status"`
 	CodigoEmpresa    *int       `json:"codigo_empresa,omitempty"`
@@ -154,6 +168,40 @@ type Timeseries struct {
 	Bucket  string             `json:"bucket"` // day|week
 	TZ      string             `json:"tz"`     // America/Sao_Paulo
 	Buckets []TimeseriesBucket `json:"buckets"`
+}
+
+// DocTypeCount é a contagem de notas por tipo de documento (gráfico de distribuição).
+type DocTypeCount struct {
+	DocType DocType `json:"doc_type"`
+	Count   int     `json:"count"`
+}
+
+// BacklogBucket é quantas notas pendentes (não-terminais) estão esperando há quanto
+// tempo (faixa de idade desde a chegada). Para visualizar notas presas na fila.
+type BacklogBucket struct {
+	Label string `json:"label"` // <1h | 1-6h | 6-24h | 1-3d | 3-7d | >7d
+	Count int    `json:"count"`
+}
+
+// BacklogBuckets é a ordem canônica das faixas de idade do backlog.
+var BacklogBuckets = []string{"<1h", "1-6h", "6-24h", "1-3d", "3-7d", ">7d"}
+
+// BacklogBucketOf mapeia uma idade (desde a chegada) para a faixa do backlog.
+func BacklogBucketOf(age time.Duration) string {
+	switch {
+	case age < time.Hour:
+		return "<1h"
+	case age < 6*time.Hour:
+		return "1-6h"
+	case age < 24*time.Hour:
+		return "6-24h"
+	case age < 72*time.Hour:
+		return "1-3d"
+	case age < 168*time.Hour:
+		return "3-7d"
+	default:
+		return ">7d"
+	}
 }
 
 // EmpresaAgg is the per-empresa status breakdown (quem está pendente).

@@ -475,6 +475,67 @@ ORDER BY s.b`, unit, step, tzSaoPaulo)
 	return ts, rows.Err()
 }
 
+func (p *Postgres) DocTypes(ctx context.Context) ([]model.DocTypeCount, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT doc_type, count(*) FROM notas GROUP BY doc_type ORDER BY count(*) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.DocTypeCount{}
+	for rows.Next() {
+		var d model.DocTypeCount
+		if err := rows.Scan(&d.DocType, &d.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) BacklogAge(ctx context.Context) ([]model.BacklogBucket, error) {
+	// Idade desde a chegada das notas pendentes (não-terminais). COALESCE com
+	// first_seen_at p/ notas sem arrived_at (ex.: vistas só pelo poller como pendente).
+	rows, err := p.pool.Query(ctx, `
+		SELECT CASE
+		         WHEN age < interval '1 hour'   THEN '<1h'
+		         WHEN age < interval '6 hours'  THEN '1-6h'
+		         WHEN age < interval '24 hours' THEN '6-24h'
+		         WHEN age < interval '3 days'   THEN '1-3d'
+		         WHEN age < interval '7 days'   THEN '3-7d'
+		         ELSE '>7d'
+		       END AS label, count(*)
+		FROM (SELECT now() - COALESCE(arrived_at, first_seen_at) AS age
+		      FROM notas WHERE status IN ('arrived','synced','pending_import')) s
+		GROUP BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var label string
+		var n int
+		if err := rows.Scan(&label, &n); err != nil {
+			return nil, err
+		}
+		counts[label] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return orderedBacklog(counts), nil
+}
+
+// orderedBacklog monta o slice na ordem canônica das faixas, incluindo as vazias (0).
+func orderedBacklog(counts map[string]int) []model.BacklogBucket {
+	out := make([]model.BacklogBucket, 0, len(model.BacklogBuckets))
+	for _, label := range model.BacklogBuckets {
+		out = append(out, model.BacklogBucket{Label: label, Count: counts[label]})
+	}
+	return out
+}
+
 func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
 	// pendentes = itens não-terminais (espelha pendentes() do store em memória).
 	const pend = "count(*) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck'))"
@@ -489,6 +550,12 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 		order = pend + " DESC, codigo_empresa, fil"
 	}
 	args := []any{}
+	where := ""
+	if f.Query != "" {
+		args = append(args, "%"+f.Query+"%")
+		// trigram (idx_notas_empresa_nome_trgm) -> corta o conjunto antes do GROUP BY.
+		where = fmt.Sprintf("WHERE empresa_nome ILIKE $%d", len(args))
+	}
 	limit := ""
 	if f.Limit > 0 {
 		args = append(args, f.Limit, f.Offset)
@@ -509,10 +576,11 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 		  count(*) FILTER (WHERE status='lost'),
 		  count(*) OVER ()
 		FROM notas
+		%s
 		GROUP BY codigo_empresa, fil
 		%s
 		ORDER BY %s
-		%s`, having, order, limit)
+		%s`, where, having, order, limit)
 	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, 0, err
@@ -651,6 +719,7 @@ func scanNota(r rowScanner) (model.Nota, error) {
 	if emissao != nil {
 		n.DataEmissao = emissao.Format("2006-01-02")
 	}
+	n.NumeroNota = model.NumeroNota(n.ChaveAcesso)
 	return n, err
 }
 
