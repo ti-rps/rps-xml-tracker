@@ -53,6 +53,20 @@ func main() {
 		log.Fatalf("store: valor inválido para TRACKER_STORE")
 	}
 
+	// Cache dos agregados do dashboard (overview/empresas/timeseries): a query
+	// roda no máx 1x/TTL por chave, refreshs concorrentes não empilham. TTL via
+	// TRACKER_DASHBOARD_CACHE_TTL (default 30s); "0" desliga.
+	ttl := 30 * time.Second
+	if v := os.Getenv("TRACKER_DASHBOARD_CACHE_TTL"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil {
+			ttl = d
+		}
+	}
+	if ttl > 0 {
+		st = store.NewCached(st, ttl)
+		log.Printf("cache do dashboard: TTL=%s", ttl)
+	}
+
 	srv := api.New(st, cfg)
 	addr := ":" + getenv("TRACKER_API_PORT", "8090")
 	httpSrv := &http.Server{
