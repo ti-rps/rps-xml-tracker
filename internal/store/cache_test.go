@@ -51,12 +51,17 @@ func TestCached_SingleFlightAndTTL(t *testing.T) {
 		t.Fatalf("dentro do TTL: esperava 1, veio %d", n)
 	}
 
-	// Após o TTL: recomputa.
+	// Após o TTL: o get devolve o valor velho NA HORA (não bloqueia) e dispara um
+	// refresh em background, que recomputa de forma assíncrona.
 	time.Sleep(250 * time.Millisecond)
 	if _, err := c.Overview(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&base.calls) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if n := atomic.LoadInt32(&base.calls); n != 2 {
-		t.Fatalf("após o TTL: esperava 2, veio %d", n)
+		t.Fatalf("após o TTL (refresh async): esperava 2, veio %d", n)
 	}
 }
