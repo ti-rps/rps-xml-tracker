@@ -70,6 +70,7 @@ components:
       type: object
       properties:
         chave_acesso:     { type: string }
+        numero_nota:      { type: string, description: "nNF (número da nota), derivado da chave; ausente p/ NFSe" }
         doc_type:         { $ref: '#/components/schemas/DocType' }
         status:           { $ref: '#/components/schemas/NotaStatus' }
         empresa:          { $ref: '#/components/schemas/EmpresaRef' }
@@ -206,6 +207,7 @@ paths:
         de uma empresa, use GET /notas?codigo_empresa=...&status=...
       parameters:
         - { name: pendentes, in: query, schema: { type: boolean }, description: só empresas com itens não-terminais (arrived/synced/pending_import/stuck) }
+        - { name: q, in: query, schema: { type: string }, description: "busca por nome da empresa (parcial, case-insensitive)" }
         - { name: sort, in: query, schema: { type: string, enum: [codigo, pendentes] }, description: "ordenação: 'pendentes' = mais pendentes primeiro; default por código" }
         - { name: limit,  in: query, schema: { type: integer, default: 0 }, description: "0 = todas (sem paginação)" }
         - { name: offset, in: query, schema: { type: integer, default: 0 } }

@@ -489,6 +489,12 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 		order = pend + " DESC, codigo_empresa, fil"
 	}
 	args := []any{}
+	where := ""
+	if f.Query != "" {
+		args = append(args, "%"+f.Query+"%")
+		// trigram (idx_notas_empresa_nome_trgm) -> corta o conjunto antes do GROUP BY.
+		where = fmt.Sprintf("WHERE empresa_nome ILIKE $%d", len(args))
+	}
 	limit := ""
 	if f.Limit > 0 {
 		args = append(args, f.Limit, f.Offset)
@@ -509,10 +515,11 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 		  count(*) FILTER (WHERE status='lost'),
 		  count(*) OVER ()
 		FROM notas
+		%s
 		GROUP BY codigo_empresa, fil
 		%s
 		ORDER BY %s
-		%s`, having, order, limit)
+		%s`, where, having, order, limit)
 	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, 0, err
@@ -651,6 +658,7 @@ func scanNota(r rowScanner) (model.Nota, error) {
 	if emissao != nil {
 		n.DataEmissao = emissao.Format("2006-01-02")
 	}
+	n.NumeroNota = model.NumeroNota(n.ChaveAcesso)
 	return n, err
 }
 

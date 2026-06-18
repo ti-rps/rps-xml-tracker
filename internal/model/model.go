@@ -1,7 +1,20 @@
 // Package model defines the core domain types shared across the tracker.
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
+
+// NumeroNota extrai o número da nota (tag <nNF> do XML) da chave de acesso: nas 44
+// posições da chave NFe/NFCe/CTe, o nNF são os 9 dígitos nas posições 26–34, sem
+// zeros à esquerda. Retorna "" se a chave não tiver 44 dígitos (ex.: NFSe).
+func NumeroNota(chave string) string {
+	if len(chave) != 44 {
+		return ""
+	}
+	return strings.TrimLeft(chave[25:34], "0")
+}
 
 // DocType is the authoritative document type, derived from the agent's XML parse
 // (Firebird's TIPODOCUMENTO is unreliable — see Fase 0 findings).
@@ -76,6 +89,7 @@ type Observation struct {
 // Nota is the derived state for a single chave (NFe/NFCe/CTe).
 type Nota struct {
 	ChaveAcesso      string     `json:"chave_acesso"`
+	NumeroNota       string     `json:"numero_nota,omitempty"` // nNF, derivado da chave
 	DocType          DocType    `json:"doc_type"`
 	Status           NotaStatus `json:"status"`
 	CodigoEmpresa    *int       `json:"codigo_empresa,omitempty"`

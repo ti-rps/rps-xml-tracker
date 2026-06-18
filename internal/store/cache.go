@@ -127,7 +127,12 @@ type empresasResult struct {
 }
 
 func (c *Cached) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
-	key := fmt.Sprintf("empresas|%t|%s|%d|%d", f.PendentesOnly, f.Sort, f.Limit, f.Offset)
+	// Busca por nome é rápida (trigram corta o conjunto) e tem cardinalidade alta de
+	// chaves — passa direto, sem cachear (evita inflar o mapa do cache).
+	if f.Query != "" {
+		return c.Store.Empresas(ctx, f)
+	}
+	key := fmt.Sprintf("empresas|%t|%s|%s|%d|%d", f.PendentesOnly, f.Query, f.Sort, f.Limit, f.Offset)
 	v, err := c.get(key, func(cctx context.Context) (any, error) {
 		items, total, e := c.Store.Empresas(cctx, f)
 		if e != nil {

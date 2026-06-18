@@ -117,6 +117,7 @@ func (s *Server) handleTimeseries(c *gin.Context) {
 func (s *Server) handleEmpresas(c *gin.Context) {
 	f := store.EmpresaFilter{
 		PendentesOnly: c.Query("pendentes") == "true",
+		Query:         c.Query("q"),
 		Sort:          c.Query("sort"),
 		Limit:         atoiDefault(c.Query("limit"), 0), // 0 = todas (sem paginação)
 		Offset:        atoiDefault(c.Query("offset"), 0),

@@ -54,6 +54,7 @@ type Store interface {
 // EmpresaFilter holds the supported per-empresa aggregation filters.
 type EmpresaFilter struct {
 	PendentesOnly bool   // só empresas com itens não-terminais (arrived/synced/pending_import/stuck)
+	Query         string // busca por nome da empresa (ILIKE); vazio = todas
 	Sort          string // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
 	Limit         int    // <=0 retorna todas (sem paginação)
 	Offset        int

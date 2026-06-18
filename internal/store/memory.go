@@ -323,6 +323,9 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 		if f.PendentesOnly && pendentes(a.StatusCounts) == 0 {
 			continue
 		}
+		if f.Query != "" && !containsFold(a.NomeEmpresa, f.Query) {
+			continue
+		}
 		a.InTransit = a.Arrived + a.Synced
 		out = append(out, *a)
 	}
