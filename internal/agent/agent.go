@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -56,10 +57,25 @@ type submitter interface {
 
 // Agent holds the scan state.
 type Agent struct {
-	cfg  Config
-	sink submitter
-	db   *bolt.DB
-	now  func() time.Time
+	cfg    Config
+	sink   submitter
+	db     *bolt.DB
+	now    func() time.Time
+	sinkMu sync.Mutex // serializa Submit/FlushSpool entre os loops concorrentes (chegada/sync)
+}
+
+// submitSafe e flushSpoolSafe serializam o acesso ao sink entre os dois loops de
+// scan. O WalkDir (parte lenta) fica FORA do lock; só a chamada de rede é serializada.
+func (a *Agent) submitSafe(ctx context.Context, batch []model.Observation) error {
+	a.sinkMu.Lock()
+	defer a.sinkMu.Unlock()
+	return a.sink.Submit(ctx, batch)
+}
+
+func (a *Agent) flushSpoolSafe(ctx context.Context) {
+	a.sinkMu.Lock()
+	defer a.sinkMu.Unlock()
+	_, _ = a.sink.FlushSpool(ctx)
 }
 
 var seenBucket = []byte("seen")
@@ -112,12 +128,18 @@ const (
 	progressEvery  = 5000 // loga progresso a cada N arquivos escaneados
 )
 
-// ScanOnce flushes any spooled batches, then scans all roots once.
+// ScanOnce flushes any spooled batches, then scans ALL roots once (arrival+sync
+// sequentially). Mantido para testes e para o caminho simples; em produção o agente
+// usa RunSplit, que escaneia chegada e sync em loops independentes (a varredura
+// gigante do sync não pode atrasar a detecção da chegada).
 func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
+	return a.scanRoots(ctx, "all", a.cfg.Roots)
+}
+
+// scanRoots flushes any spooled batches, then walks the given roots once.
+func (a *Agent) scanRoots(ctx context.Context, label string, roots []Root) (Result, error) {
 	var res Result
-	if _, err := a.sink.FlushSpool(ctx); err != nil {
-		// non-fatal: keep scanning; spool will retry next cycle
-	}
+	a.flushSpoolSafe(ctx) // non-fatal: spool retries next cycle
 
 	// Seeding by cutoff timestamp: on the very first run (no cutoff stored yet,
 	// and not a backfill) record "now" as the backlog cutoff and persist it
@@ -142,7 +164,7 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := a.sink.Submit(ctx, batch); err != nil {
+		if err := a.submitSafe(ctx, batch); err != nil {
 			return err
 		}
 		batch = batch[:0]
@@ -178,7 +200,7 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 		return nil
 	}
 
-	for _, root := range a.cfg.Roots {
+	for _, root := range roots {
 		err := filepath.WalkDir(root.Path, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil // skip unreadable entries
@@ -191,8 +213,8 @@ func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
 			}
 			res.Scanned++
 			if res.Scanned%progressEvery == 0 {
-				log.Printf("scan em progresso: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
-					res.Scanned, res.New, res.Emitted, res.SkippedNoChave)
+				log.Printf("scan[%s] em progresso: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
+					label, res.Scanned, res.New, res.Emitted, res.SkippedNoChave)
 			}
 
 			info, ierr := d.Info()
@@ -388,4 +410,50 @@ func (a *Agent) Run(ctx context.Context, interval time.Duration, onResult func(R
 		case <-t.C:
 		}
 	}
+}
+
+// RunSplit escaneia chegada e sync em LOOPS INDEPENDENTES, cada um no seu intervalo.
+// Motivo: a pasta de chegada esvazia (Download XML recorta p/ SINCRONIZADO), então é
+// pequena e deve ser varrida com frequência (detecção em ~1 ciclo); já o SINCRONIZADO
+// acumula milhões de arquivos e uma passada leva dias. Num scan único e sequencial, a
+// nota recém-chegada ficava refém da varredura gigante do sync. Separados, a chegada
+// é detectada em minutos. Os dois loops compartilham bbolt (single-writer safe) e o
+// sink (serializado por sinkMu); cada scanRoots tem batch/estado locais.
+func (a *Agent) RunSplit(ctx context.Context, arrivalInterval, syncInterval time.Duration, onResult func(group string, res Result, err error)) {
+	var arrivalRoots, syncRoots []Root
+	for _, r := range a.cfg.Roots {
+		if r.Stage == model.StageArrival {
+			arrivalRoots = append(arrivalRoots, r)
+		} else {
+			syncRoots = append(syncRoots, r)
+		}
+	}
+
+	loop := func(wg *sync.WaitGroup, label string, roots []Root, interval time.Duration) {
+		defer wg.Done()
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			res, err := a.scanRoots(ctx, label, roots)
+			if onResult != nil {
+				onResult(label, res, err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}
+
+	var wg sync.WaitGroup
+	if len(arrivalRoots) > 0 {
+		wg.Add(1)
+		go loop(&wg, "chegada", arrivalRoots, arrivalInterval)
+	}
+	if len(syncRoots) > 0 {
+		wg.Add(1)
+		go loop(&wg, "sync", syncRoots, syncInterval)
+	}
+	wg.Wait()
 }

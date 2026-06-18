@@ -22,7 +22,8 @@
 //	TRACKER_AGENT_NAME       default "SRVIMPORT"
 //	TRACKER_AGENT_STATE      default <dir do exe>\agent-state.db
 //	TRACKER_AGENT_SPOOL      default <dir do exe>\agent-spool
-//	TRACKER_AGENT_SCAN_INTERVAL  default "60s"
+//	TRACKER_AGENT_SCAN_INTERVAL  intervalo da varredura de CHEGADA, default "60s"
+//	TRACKER_AGENT_SYNC_INTERVAL  intervalo da varredura do SINCRONIZADO, default "1h"
 //	TRACKER_AGENT_BACKFILL   "true" para processar o backlog (default false)
 package main
 
@@ -48,30 +49,31 @@ const svcName = "RpsXmlTrackerAgent"
 // program implements service.Interface: Start launches the scan loop in the
 // background and returns immediately; Stop cancels it and closes the state DB.
 type program struct {
-	ag       *agent.Agent
-	interval time.Duration
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	ag              *agent.Agent
+	arrivalInterval time.Duration // varredura da pasta de chegada (curto: ela esvazia)
+	syncInterval    time.Duration // varredura do SINCRONIZADO (longo: milhões de arquivos)
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 func (p *program) Start(service.Service) error {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		log.Printf("agente iniciando — intervalo=%s backfill=%v",
-			p.interval, os.Getenv("TRACKER_AGENT_BACKFILL") == "true")
-		p.ag.Run(p.ctx, p.interval, func(r agent.Result, err error) {
+		log.Printf("agente iniciando — chegada=%s sync=%s backfill=%v",
+			p.arrivalInterval, p.syncInterval, os.Getenv("TRACKER_AGENT_BACKFILL") == "true")
+		p.ag.RunSplit(p.ctx, p.arrivalInterval, p.syncInterval, func(group string, r agent.Result, err error) {
 			switch {
 			case err != nil:
-				log.Printf("scan erro: %v", err)
+				log.Printf("scan[%s] erro: %v", group, err)
 			case r.Seeded:
-				log.Printf("primeira execução: cutoff de backlog gravado — arquivos anteriores ignorados; emitindo apenas novos a partir de agora")
+				log.Printf("scan[%s] primeira execução: cutoff de backlog gravado — arquivos anteriores ignorados; emitindo apenas novos a partir de agora", group)
 				fallthrough
 			default:
 				if r.New > 0 {
-					log.Printf("scan: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
-						r.Scanned, r.New, r.Emitted, r.SkippedNoChave)
+					log.Printf("scan[%s]: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
+						group, r.Scanned, r.New, r.Emitted, r.SkippedNoChave)
 				}
 			}
 		})
@@ -118,10 +120,17 @@ func (p *program) build() {
 	}
 
 	p.ag = ag
-	p.interval = 60 * time.Second
+	// Chegada: curto (a pasta esvazia). Sync: longo (milhões de arquivos por passada).
+	p.arrivalInterval = 60 * time.Second
 	if v := os.Getenv("TRACKER_AGENT_SCAN_INTERVAL"); v != "" {
 		if d, e := time.ParseDuration(v); e == nil {
-			p.interval = d
+			p.arrivalInterval = d
+		}
+	}
+	p.syncInterval = time.Hour
+	if v := os.Getenv("TRACKER_AGENT_SYNC_INTERVAL"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil {
+			p.syncInterval = d
 		}
 	}
 	p.ctx, p.cancel = context.WithCancel(context.Background())

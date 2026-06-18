@@ -234,3 +234,44 @@ func TestSeedCutoff_PersistsAndPreventsReseed(t *testing.T) {
 		t.Fatalf("reopened agent re-seeded; persisted cutoff should make Seeded=false")
 	}
 }
+
+// TestScanRoots_SubsetByStage garante que scanRoots varre APENAS os roots passados
+// e marca o estágio certo — base do RunSplit (chegada e sync em loops separados).
+func TestScanRoots_SubsetByStage(t *testing.T) {
+	arrivalDir := t.TempDir()
+	syncDir := t.TempDir()
+	write(t, arrivalDir, "1203-1 EMP/NFE/a.xml", nfeXML)
+	write(t, syncDir, "1203-1 EMP/NFE/s.xml", nfeXML)
+
+	sink := &fakeSink{}
+	a, err := New(Config{
+		Name: "TEST",
+		Roots: []Root{
+			{Path: arrivalDir, Stage: model.StageArrival, Event: model.EventFileSeen},
+			{Path: syncDir, Stage: model.StageSync, Event: model.EventFileMoved},
+		},
+		StatePath: filepath.Join(t.TempDir(), "state.db"),
+		StableAge: time.Nanosecond,
+		Backfill:  true,
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+
+	// só o root de chegada -> 1 obs de chegada
+	if _, err := a.scanRoots(context.Background(), "chegada", []Root{a.cfg.Roots[0]}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.got) != 1 || sink.got[0].Stage != model.StageArrival {
+		t.Fatalf("esperava 1 obs de chegada, veio %+v", sink.got)
+	}
+
+	// só o root de sync -> +1 obs de sync (a de chegada não é re-varrida aqui)
+	if _, err := a.scanRoots(context.Background(), "sync", []Root{a.cfg.Roots[1]}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.got) != 2 || sink.got[1].Stage != model.StageSync {
+		t.Fatalf("esperava +1 obs de sync, veio %+v", sink.got)
+	}
+}
