@@ -24,10 +24,11 @@ type Cached struct {
 }
 
 type cacheItem struct {
-	mu      sync.Mutex // single-flight: serializa o recompute desta chave
-	val     any
-	expires time.Time
-	has     bool
+	mu         sync.Mutex // single-flight: serializa o recompute desta chave
+	val        any
+	expires    time.Time
+	has        bool
+	refreshing bool // já existe um refresh em background em andamento
 }
 
 // NewCached embrulha s com um cache de TTL para os agregados do dashboard.
@@ -35,11 +36,15 @@ func NewCached(s Store, ttl time.Duration) *Cached {
 	return &Cached{Store: s, ttl: ttl, m: map[string]*cacheItem{}}
 }
 
-// get devolve o valor em cache se fresco; senão recomputa (apenas UMA goroutine por
-// chave de cada vez — as demais esperam no it.mu e pegam o resultado fresco). Erros
-// não são cacheados (próxima chamada tenta de novo). O compute roda num contexto
-// destacado (com timeout) para não ser cancelado se o cliente que disparou
-// desconectar — o resultado é compartilhado.
+// get serve o dashboard sem nunca bloquear (exceto o primeiríssimo cálculo por
+// chave, por boot). Estratégia stale-while-revalidate:
+//   - cache fresco -> devolve na hora.
+//   - cache velho mas presente -> devolve o velho NA HORA e dispara um refresh em
+//     BACKGROUND (uma só goroutine por chave). A query lenta sai do caminho do request.
+//   - cache vazio (cold start) -> calcula bloqueando, sob it.mu (single-flight: chamadas
+//     concorrentes esperam e pegam o resultado, não abrem N queries).
+// Erros não são cacheados. O compute roda em contexto destacado (com timeout) para não
+// ser cancelado se o cliente que disparou desconectar — o resultado é compartilhado.
 func (c *Cached) get(key string, compute func(context.Context) (any, error)) (any, error) {
 	c.mu.Lock()
 	it := c.m[key]
@@ -50,18 +55,41 @@ func (c *Cached) get(key string, compute func(context.Context) (any, error)) (an
 	c.mu.Unlock()
 
 	it.mu.Lock()
-	defer it.mu.Unlock()
-	if it.has && time.Now().Before(it.expires) {
-		return it.val, nil
+	if it.has {
+		val := it.val
+		if !time.Now().Before(it.expires) && !it.refreshing { // velho e ninguém atualizando
+			it.refreshing = true
+			go c.refreshAsync(it, compute)
+		}
+		it.mu.Unlock()
+		return val, nil // devolve fresco OU velho, sempre instantâneo
 	}
-	cctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	val, err := compute(cctx)
+	// cold start: calcula bloqueando, segurando it.mu (single-flight).
+	defer it.mu.Unlock()
+	val, err := computeDetached(compute)
 	if err != nil {
 		return val, err // não cacheia erro
 	}
 	it.val, it.expires, it.has = val, time.Now().Add(c.ttl), true
 	return val, nil
+}
+
+// refreshAsync recalcula em background e atualiza o cache; roda enquanto o request
+// já devolveu o valor velho.
+func (c *Cached) refreshAsync(it *cacheItem, compute func(context.Context) (any, error)) {
+	val, err := computeDetached(compute)
+	it.mu.Lock()
+	if err == nil {
+		it.val, it.expires, it.has = val, time.Now().Add(c.ttl), true
+	}
+	it.refreshing = false
+	it.mu.Unlock()
+}
+
+func computeDetached(compute func(context.Context) (any, error)) (any, error) {
+	cctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	return compute(cctx)
 }
 
 func (c *Cached) Overview(ctx context.Context) (model.Overview, error) {
