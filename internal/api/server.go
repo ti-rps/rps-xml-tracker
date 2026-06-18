@@ -82,6 +82,8 @@ func (s *Server) routes() {
 	read.GET("/notas/:chave", s.handleGetNota)
 	read.GET("/metrics/overview", s.handleOverview)
 	read.GET("/metrics/timeseries", s.handleTimeseries)
+	read.GET("/metrics/doctypes", s.handleDocTypes)
+	read.GET("/metrics/backlog-age", s.handleBacklogAge)
 	read.GET("/empresas", s.handleEmpresas)
 	read.GET("/nfse/import", s.handleNfseImport)
 }
@@ -112,6 +114,27 @@ func (s *Server) handleTimeseries(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, ts)
+}
+
+func (s *Server) handleDocTypes(c *gin.Context) {
+	items, err := s.st.DocTypes(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular distribuição por tipo"})
+		return
+	}
+	if items == nil {
+		items = []model.DocTypeCount{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+func (s *Server) handleBacklogAge(c *gin.Context) {
+	items, err := s.st.BacklogAge(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular idade do backlog"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 func (s *Server) handleEmpresas(c *gin.Context) {

@@ -170,6 +170,40 @@ type Timeseries struct {
 	Buckets []TimeseriesBucket `json:"buckets"`
 }
 
+// DocTypeCount é a contagem de notas por tipo de documento (gráfico de distribuição).
+type DocTypeCount struct {
+	DocType DocType `json:"doc_type"`
+	Count   int     `json:"count"`
+}
+
+// BacklogBucket é quantas notas pendentes (não-terminais) estão esperando há quanto
+// tempo (faixa de idade desde a chegada). Para visualizar notas presas na fila.
+type BacklogBucket struct {
+	Label string `json:"label"` // <1h | 1-6h | 6-24h | 1-3d | 3-7d | >7d
+	Count int    `json:"count"`
+}
+
+// BacklogBuckets é a ordem canônica das faixas de idade do backlog.
+var BacklogBuckets = []string{"<1h", "1-6h", "6-24h", "1-3d", "3-7d", ">7d"}
+
+// BacklogBucketOf mapeia uma idade (desde a chegada) para a faixa do backlog.
+func BacklogBucketOf(age time.Duration) string {
+	switch {
+	case age < time.Hour:
+		return "<1h"
+	case age < 6*time.Hour:
+		return "1-6h"
+	case age < 24*time.Hour:
+		return "6-24h"
+	case age < 72*time.Hour:
+		return "1-3d"
+	case age < 168*time.Hour:
+		return "3-7d"
+	default:
+		return ">7d"
+	}
+}
+
 // EmpresaAgg is the per-empresa status breakdown (quem está pendente).
 type EmpresaAgg struct {
 	CodigoEmpresa *int   `json:"codigo_empresa,omitempty"`

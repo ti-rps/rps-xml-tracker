@@ -324,6 +324,48 @@ paths:
                         lat_sync_import_p95_s:  { type: integer, nullable: true }
         '400': { description: range ou bucket inválido }
 
+  /metrics/doctypes:
+    get:
+      summary: Distribuição de notas por tipo de documento (NFe/NFCe/CTe/...)
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        doc_type: { $ref: '#/components/schemas/DocType' }
+                        count:    { type: integer }
+
+  /metrics/backlog-age:
+    get:
+      summary: Notas pendentes por faixa de idade desde a chegada (notas presas na fila)
+      description: >
+        Faixas fixas (<1h, 1-6h, 6-24h, 1-3d, 3-7d, >7d), sempre todas presentes (0 quando vazia),
+        sobre notas não-terminais (arrived/synced/pending_import). Idade = now − arrived_at
+        (COALESCE com first_seen_at). Útil p/ ver notas presas aguardando sincronização.
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        label: { type: string, example: "1-6h" }
+                        count: { type: integer }
+
   /metrics/throughput:
     get:
       summary: "(placeholder antigo, não implementado — use /metrics/timeseries) Série temporal por etapa"
