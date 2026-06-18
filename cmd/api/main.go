@@ -64,8 +64,15 @@ func main() {
 		}
 	}
 	if ttl > 0 {
-		st = store.NewCached(st, ttl)
+		cached := store.NewCached(st, ttl)
+		st = cached
 		log.Printf("cache do dashboard: TTL=%s", ttl)
+		// Aquece os agregados em background ao subir, pra o 1º acesso já achar tudo
+		// em cache (sem cold-start lento). Serializado internamente (não afoga o banco).
+		go func() {
+			cached.Warm(context.Background())
+			log.Println("cache do dashboard: aquecido")
+		}()
 	}
 
 	srv := api.New(st, cfg)

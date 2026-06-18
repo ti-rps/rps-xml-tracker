@@ -65,3 +65,18 @@ func TestCached_SingleFlightAndTTL(t *testing.T) {
 		t.Fatalf("após o TTL (refresh async): esperava 2, veio %d", n)
 	}
 }
+
+// TestCached_Warm garante que o aquecimento popula o cache (acesso seguinte não
+// recomputa).
+func TestCached_Warm(t *testing.T) {
+	base := &countingStore{Store: NewMemory()}
+	c := NewCached(base, time.Minute)
+	c.Warm(context.Background())
+	before := atomic.LoadInt32(&base.calls)
+	if _, err := c.Overview(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&base.calls); got != before {
+		t.Fatalf("Warm não deixou o overview em cache: chamadas foram %d->%d", before, got)
+	}
+}

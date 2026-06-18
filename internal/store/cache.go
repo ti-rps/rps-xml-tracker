@@ -21,6 +21,7 @@ type Cached struct {
 	ttl time.Duration
 	mu  sync.Mutex // guarda o mapa
 	m   map[string]*cacheItem
+	sem chan struct{} // serializa os recálculos pesados (1 por vez) p/ não afogar o IO
 }
 
 type cacheItem struct {
@@ -33,7 +34,20 @@ type cacheItem struct {
 
 // NewCached embrulha s com um cache de TTL para os agregados do dashboard.
 func NewCached(s Store, ttl time.Duration) *Cached {
-	return &Cached{Store: s, ttl: ttl, m: map[string]*cacheItem{}}
+	return &Cached{Store: s, ttl: ttl, m: map[string]*cacheItem{}, sem: make(chan struct{}, 1)}
+}
+
+// Warm pré-computa os agregados do dashboard em background ao subir a API, para que
+// o primeiro acesso já encontre tudo em cache (sem o cold-start lento). Roda os
+// recálculos serializados pelo sem, então não afogam o banco. Erros são ignorados
+// (o acesso normal recomputa). Chaves cobrem o que o Painel do maestro consome.
+func (c *Cached) Warm(ctx context.Context) {
+	_, _ = c.Overview(ctx)
+	for _, r := range []int{7, 30, 90} {
+		_, _ = c.Timeseries(ctx, TimeseriesFilter{RangeDays: r, Bucket: "day"})
+	}
+	_, _, _ = c.Empresas(ctx, EmpresaFilter{}) // tab Empresas (todas)
+	_, _, _ = c.Empresas(ctx, EmpresaFilter{PendentesOnly: true, Sort: "pendentes"})
 }
 
 // get serve o dashboard sem nunca bloquear (exceto o primeiríssimo cálculo por
@@ -66,7 +80,7 @@ func (c *Cached) get(key string, compute func(context.Context) (any, error)) (an
 	}
 	// cold start: calcula bloqueando, segurando it.mu (single-flight).
 	defer it.mu.Unlock()
-	val, err := computeDetached(compute)
+	val, err := c.computeDetached(compute)
 	if err != nil {
 		return val, err // não cacheia erro
 	}
@@ -77,7 +91,7 @@ func (c *Cached) get(key string, compute func(context.Context) (any, error)) (an
 // refreshAsync recalcula em background e atualiza o cache; roda enquanto o request
 // já devolveu o valor velho.
 func (c *Cached) refreshAsync(it *cacheItem, compute func(context.Context) (any, error)) {
-	val, err := computeDetached(compute)
+	val, err := c.computeDetached(compute)
 	it.mu.Lock()
 	if err == nil {
 		it.val, it.expires, it.has = val, time.Now().Add(c.ttl), true
@@ -86,8 +100,13 @@ func (c *Cached) refreshAsync(it *cacheItem, compute func(context.Context) (any,
 	it.mu.Unlock()
 }
 
-func computeDetached(compute func(context.Context) (any, error)) (any, error) {
-	cctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+// computeDetached roda o compute serializado pelo sem (1 query pesada por vez, para
+// não afogar o IO do banco com a manada de cold-starts do dashboard) e num contexto
+// destacado com timeout generoso (queries de agregação sobre 14M chegam a ~1min).
+func (c *Cached) computeDetached(compute func(context.Context) (any, error)) (any, error) {
+	c.sem <- struct{}{}        // adquire o slot (espera se outro recálculo está rodando)
+	defer func() { <-c.sem }() // libera
+	cctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	return compute(cctx)
 }
