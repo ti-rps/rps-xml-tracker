@@ -7,6 +7,7 @@
 //	TRACKER_STORE    postgres (default) | memory
 //	TRACKER_PG_DSN   Postgres DSN (when TRACKER_STORE=postgres)
 //	TRACKER_POLL_INTERVAL  e.g. 30s (default)
+//	TRACKER_POLL_BATCH     chaves in-flight por ciclo (default 8000)
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -63,8 +65,19 @@ func main() {
 		}
 	}
 
-	log.Printf("poller iniciando (intervalo %s)", interval)
-	poller.New(st, rd).Run(ctx, interval, func(r poller.Result, err error) {
+	// Chaves in-flight checadas por ciclo. Default alto (8000) p/ drenar backlogs
+	// grandes (milhões de in-flight) — a rotação cai de horas p/ ~1-2h. Tunável.
+	batch := 8000
+	if v := os.Getenv("TRACKER_POLL_BATCH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			batch = n
+		}
+	}
+
+	p := poller.New(st, rd)
+	p.SetBatch(batch)
+	log.Printf("poller iniciando (intervalo %s, lote %d)", interval, batch)
+	p.Run(ctx, interval, func(r poller.Result, err error) {
 		if err != nil {
 			log.Printf("ciclo erro: %v", err)
 			return

@@ -52,6 +52,15 @@ func New(st store.Store, fb reader) *Poller {
 	return &Poller{st: st, fb: fb, now: time.Now, batch: 1000}
 }
 
+// SetBatch ajusta quantas chaves in-flight são checadas por ciclo. Lotes maiores
+// drenam um backlog grande de in-flight bem mais rápido (o Lookup chunka em 400 p/
+// o Firebird, então é seguro). Ignora valores <=0.
+func (p *Poller) SetBatch(n int) {
+	if n > 0 {
+		p.batch = n
+	}
+}
+
 // Result reports one cycle's outcome.
 type Result struct {
 	Checked  int
