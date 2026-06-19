@@ -56,6 +56,11 @@ type Store interface {
 
 	// ListNfseImport returns NFSe import-side records (lado Firebird).
 	ListNfseImport(ctx context.Context, f NfseFilter) (items []model.NfseImport, total int, err error)
+
+	// UpsertHeartbeat atualiza (ou insere) o heartbeat de um serviço com o payload fornecido.
+	UpsertHeartbeat(ctx context.Context, service string, payload map[string]any) error
+	// GetStatus retorna o último heartbeat de cada serviço registrado.
+	GetStatus(ctx context.Context) ([]model.ServiceStatus, error)
 }
 
 // EmpresaFilter holds the supported per-empresa aggregation filters.

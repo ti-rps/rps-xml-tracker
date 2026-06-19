@@ -28,9 +28,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,6 +45,7 @@ import (
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/agent"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/ingest"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/signing"
 )
 
 const svcName = "RpsXmlTrackerAgent"
@@ -55,6 +59,9 @@ type program struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	apiURL          string
+	secret          string
+	name            string
 }
 
 func (p *program) Start(service.Service) error {
@@ -67,6 +74,9 @@ func (p *program) Start(service.Service) error {
 			switch {
 			case err != nil:
 				log.Printf("scan[%s] erro: %v", group, err)
+				postHeartbeat(p.ctx, p.apiURL, p.secret, p.name, map[string]any{
+					"scan_type": group, "error": err.Error(),
+				})
 			case r.Seeded:
 				log.Printf("scan[%s] primeira execução: cutoff de backlog gravado — arquivos anteriores ignorados; emitindo apenas novos a partir de agora", group)
 				fallthrough
@@ -75,6 +85,13 @@ func (p *program) Start(service.Service) error {
 					log.Printf("scan[%s]: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
 						group, r.Scanned, r.New, r.Emitted, r.SkippedNoChave)
 				}
+				postHeartbeat(p.ctx, p.apiURL, p.secret, p.name, map[string]any{
+					"scan_type":  group,
+					"escaneados": r.Scanned,
+					"novos":      r.New,
+					"emitidos":   r.Emitted,
+					"sem_chave":  r.SkippedNoChave,
+				})
 			}
 		})
 	}()
@@ -120,6 +137,9 @@ func (p *program) build() {
 	}
 
 	p.ag = ag
+	p.apiURL = apiURL
+	p.secret = secret
+	p.name = name
 	// Chegada: curto (a pasta esvazia). Sync: longo (milhões de arquivos por passada).
 	p.arrivalInterval = 60 * time.Second
 	if v := os.Getenv("TRACKER_AGENT_SCAN_INTERVAL"); v != "" {
@@ -134,6 +154,34 @@ func (p *program) build() {
 		}
 	}
 	p.ctx, p.cancel = context.WithCancel(context.Background())
+}
+
+// postHeartbeat envia o heartbeat do agente para a API (mesmo HMAC do ingest).
+// Falhas são logadas e descartadas — não interrompem o scan.
+func postHeartbeat(ctx context.Context, apiURL, secret, agentName string, payload map[string]any) {
+	if apiURL == "" {
+		return
+	}
+	payload["agent_name"] = agentName
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	sig := signing.Sign(secret, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(apiURL, "/")+"/api/v1/ingest/agent/heartbeat",
+		bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Signature", sig)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("heartbeat: %v", err)
+		return
+	}
+	resp.Body.Close()
 }
 
 func main() {

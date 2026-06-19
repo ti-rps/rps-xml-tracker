@@ -159,6 +159,14 @@ func (c *Cached) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empresa
 	return r.items, r.total, nil
 }
 
+func (c *Cached) UpsertHeartbeat(ctx context.Context, service string, payload map[string]any) error {
+	return c.Store.UpsertHeartbeat(ctx, service, payload)
+}
+
+func (c *Cached) GetStatus(ctx context.Context) ([]model.ServiceStatus, error) {
+	return c.Store.GetStatus(ctx)
+}
+
 func (c *Cached) Timeseries(ctx context.Context, f TimeseriesFilter) (model.Timeseries, error) {
 	key := fmt.Sprintf("ts|%d|%s", f.RangeDays, f.Bucket)
 	v, err := c.get(key, func(cctx context.Context) (any, error) {

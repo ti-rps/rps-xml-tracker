@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -75,6 +76,7 @@ func (s *Server) routes() {
 	// ingest — agent HMAC
 	ingest := v1.Group("/ingest", agentHMAC(s.cfg.AgentSecret))
 	ingest.POST("/observations", s.handleIngest)
+	ingest.POST("/agent/heartbeat", s.handleAgentHeartbeat)
 
 	// reads — maestro JWT
 	read := v1.Group("", jwtAuth(s.cfg.JWTSecret))
@@ -86,6 +88,7 @@ func (s *Server) routes() {
 	read.GET("/metrics/backlog-age", s.handleBacklogAge)
 	read.GET("/empresas", s.handleEmpresas)
 	read.GET("/nfse/import", s.handleNfseImport)
+	read.GET("/status", s.handleStatus)
 }
 
 func (s *Server) handleOverview(c *gin.Context) {
@@ -95,6 +98,33 @@ func (s *Server) handleOverview(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, ov)
+}
+
+func (s *Server) handleStatus(c *gin.Context) {
+	services, err := s.st.GetStatus(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"services": services})
+}
+
+func (s *Server) handleAgentHeartbeat(c *gin.Context) {
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 64*1024))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "leitura do body falhou"})
+		return
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "json inválido"})
+		return
+	}
+	if err := s.st.UpsertHeartbeat(c.Request.Context(), "agent", payload); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (s *Server) handleTimeseries(c *gin.Context) {

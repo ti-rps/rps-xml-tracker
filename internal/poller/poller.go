@@ -105,7 +105,8 @@ func (p *Poller) PollOnce(ctx context.Context) (Result, error) {
 		}
 		switch {
 		case st.Importado:
-			obs = append(obs, importObs(c, model.EventImported, now, nil, st))
+			obs = append(obs, importObs(c, model.EventImported, now,
+				map[string]any{"via_robo": st.DataRobo != nil}, st))
 			res.Imported++
 		case st.ImportIgnorada:
 			payload := map[string]any{}
@@ -200,10 +201,10 @@ func (p *Poller) RepollImportIgnored(ctx context.Context, fixPending bool) (Repo
 	return res, nil
 }
 
-// SweepOnce pergunta ao Firebird o que foi importado desde `since` (via DATAROBO) e
-// emite observações 'imported' para cada achado. É O(importadas_recentes) — não
-// enumera o backlog in-flight. Observações já existentes são rejeitadas por dedup
-// (idempotente).
+// SweepOnce pergunta ao Firebird quais notas inseridas desde `since` já estão
+// IMPORTADO=1 (via DATAINCLUSAO, sempre preenchido) e emite observações 'imported'
+// para cada achado. É O(inseridas_recentes) — não enumera o backlog in-flight.
+// Observações já existentes são rejeitadas por dedup (idempotente).
 func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, error) {
 	var res SweepResult
 	states, err := p.fb.SweepImported(ctx, since)
@@ -220,7 +221,8 @@ func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, e
 		if !st.Importado {
 			continue
 		}
-		obs = append(obs, importObs(st.Chave, model.EventImported, now, nil, st))
+		obs = append(obs, importObs(st.Chave, model.EventImported, now,
+			map[string]any{"via_robo": st.DataRobo != nil}, st))
 	}
 	if len(obs) == 0 {
 		return res, nil
@@ -235,9 +237,8 @@ func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, e
 }
 
 // RunWithSweep é como Run mas também dispara um sweep ticker independente a cada
-// sweepInterval, olhando para trás sweepWindow via DATAROBO no Firebird. O sweep
+// sweepInterval, varrendo o Firebird por DATAINCLUSAO > (now-sweepWindow). O sweep
 // captura importações recentes em O(recentes) sem depender da rotação do backlog.
-// Notas com DATAROBO=NULL (sem robô) seguem sendo capturadas pela rotação normal.
 // O sweepInterval=0 desabilita o sweep (equivale a Run).
 func (p *Poller) RunWithSweep(
 	ctx context.Context,
@@ -284,11 +285,17 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration, onResult func(
 }
 
 func importObs(chave, event string, now time.Time, payload map[string]any, st firebird.ImportState) model.Observation {
-	// ObservedAt = hora real do robô (DATAROBO) quando disponível; fallback p/ hora
-	// de detecção. Isso faz o imported_at do tracker bater com o timestamp do Athenas.
+	// ObservedAt = hora real da importação no Athenas, com fallback em cascata:
+	//   1. DATAROBO  — mais preciso (hora exata do robô em lote); NULL em importações manuais
+	//   2. DATAINCLUSAO — sempre preenchido (quando a linha entrou no Athenas); proxy razoável
+	//   3. now()     — hora de detecção pelo poller (fallback seguro)
 	observedAt := now
-	if event == model.EventImported && st.DataRobo != nil {
-		observedAt = *st.DataRobo
+	if event == model.EventImported {
+		if st.DataRobo != nil {
+			observedAt = *st.DataRobo
+		} else if st.DataInclusao != nil {
+			observedAt = *st.DataInclusao
+		}
 	}
 	return model.Observation{
 		ChaveAcesso: chave,
