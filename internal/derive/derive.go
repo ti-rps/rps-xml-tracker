@@ -74,9 +74,9 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 				setIfEarlier(&n.PendingAt, o.ObservedAt)
 			default: // imported
 				setIfEarlier(&n.ImportedAt, o.ObservedAt)
-				if v, _ := o.Payload["via_robo"].(bool); v {
-					n.ViaRobo = true
-				}
+				// ViaRobo só é definido para notas importadas; nil = não importada.
+				vr, _ := o.Payload["via_robo"].(bool)
+				n.ViaRobo = &vr
 			}
 		}
 	}
