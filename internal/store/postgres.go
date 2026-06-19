@@ -338,7 +338,9 @@ const tzSaoPaulo = "America/Sao_Paulo"
 
 func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
 	var ov model.Overview
-	rows, err := p.pool.Query(ctx, `SELECT status, count(*) FROM notas GROUP BY status`)
+	// Contagem por status: do contador mantido (notas_counts) — instantâneo, sem
+	// escanear as 14M da notas (migração 00008).
+	rows, err := p.pool.Query(ctx, `SELECT status, sum(n)::bigint FROM notas_counts GROUP BY status`)
 	if err != nil {
 		return ov, err
 	}
@@ -356,8 +358,10 @@ func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
 		return ov, err
 	}
 
+	// Importadas hoje: range em imported_at (usa idx_notas_imported) em vez de
+	// imported_at::date (que forçava seq scan das 14M).
 	if err := p.pool.QueryRow(ctx,
-		`SELECT count(*) FROM notas WHERE imported_at::date = current_date`).Scan(&ov.ImportedToday); err != nil {
+		`SELECT count(*) FROM notas WHERE imported_at >= current_date AND imported_at < current_date + interval '1 day'`).Scan(&ov.ImportedToday); err != nil {
 		return ov, err
 	}
 
@@ -476,8 +480,9 @@ ORDER BY s.b`, unit, step, tzSaoPaulo)
 }
 
 func (p *Postgres) DocTypes(ctx context.Context) ([]model.DocTypeCount, error) {
+	// Do contador mantido (notas_counts) — instantâneo (migração 00008).
 	rows, err := p.pool.Query(ctx,
-		`SELECT doc_type, count(*) FROM notas GROUP BY doc_type ORDER BY count(*) DESC`)
+		`SELECT doc_type, sum(n)::bigint AS total FROM notas_counts GROUP BY doc_type ORDER BY total DESC`)
 	if err != nil {
 		return nil, err
 	}
