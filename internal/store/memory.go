@@ -392,6 +392,14 @@ func (m *Memory) ListNfseImport(_ context.Context, _ NfseFilter) ([]model.NfseIm
 	return []model.NfseImport{}, 0, nil
 }
 
+func (m *Memory) UpsertHeartbeat(_ context.Context, _ string, _ map[string]any) error {
+	return nil
+}
+
+func (m *Memory) GetStatus(_ context.Context) ([]model.ServiceStatus, error) {
+	return nil, nil
+}
+
 func addStatus(c *model.StatusCounts, s model.NotaStatus) {
 	switch s {
 	case model.StatusArrived:

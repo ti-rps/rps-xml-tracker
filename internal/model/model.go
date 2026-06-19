@@ -106,6 +106,7 @@ type Nota struct {
 	PendingAt        *time.Time `json:"pending_at,omitempty"` // visto no Athenas aguardando importação
 	ImportedAt       *time.Time `json:"imported_at,omitempty"`
 	ImportIgnored    bool       `json:"import_ignored"`
+	ViaRobo          bool       `json:"via_robo"` // true = importada via lote de robô (DATAROBO preenchido no Athenas)
 	MotivoIgnorado   string     `json:"motivo_ignorado,omitempty"`
 	FirstSeenAt      time.Time  `json:"first_seen_at"`
 	LastUpdateAt     time.Time  `json:"last_update_at"`
@@ -211,6 +212,15 @@ type EmpresaAgg struct {
 	NomeEmpresa   string `json:"nome_empresa,omitempty"`
 	InTransit     int    `json:"in_transit"` // arrived + synced
 	StatusCounts
+}
+
+// ServiceStatus é o último heartbeat de um serviço (poller, agent, api).
+type ServiceStatus struct {
+	Service    string         `json:"service"`
+	LastBeat   time.Time      `json:"last_beat"`
+	SecondsAgo int64          `json:"seconds_ago"`
+	Online     bool           `json:"online"` // last_beat nos últimos 5 min
+	Payload    map[string]any `json:"payload"`
 }
 
 // NfseImport is one NFSe import-side record (lado Firebird; sem etapa de chegada).

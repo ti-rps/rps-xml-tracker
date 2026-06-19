@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -88,6 +89,22 @@ func main() {
 		}
 	}
 
+	var (
+		hbMu      sync.Mutex
+		hbPayload = map[string]any{
+			"batch":            batch,
+			"sweep_interval_s": int(sweepInterval.Seconds()),
+			"sweep_window_h":   sweepWindow.Hours(),
+		}
+	)
+	copyPayload := func() map[string]any {
+		out := make(map[string]any, len(hbPayload))
+		for k, v := range hbPayload {
+			out[k] = v
+		}
+		return out
+	}
+
 	p := poller.New(st, rd)
 	p.SetBatch(batch)
 	log.Printf("poller iniciando (intervalo %s, lote %d, sweep a cada %s janela %s)",
@@ -96,21 +113,48 @@ func main() {
 		func(r poller.Result, err error) {
 			if err != nil {
 				log.Printf("ciclo erro: %v", err)
+				hbMu.Lock()
+				hbPayload["poll_error"] = err.Error()
+				pay := copyPayload()
+				hbMu.Unlock()
+				_ = st.UpsertHeartbeat(context.Background(), "poller", pay)
 				return
 			}
 			if r.Checked > 0 {
 				log.Printf("ciclo: checadas=%d importadas=%d ignoradas=%d pendentes=%d",
 					r.Checked, r.Imported, r.Ignored, r.Pending)
 			}
+			hbMu.Lock()
+			delete(hbPayload, "poll_error")
+			hbPayload["poll_checked"] = r.Checked
+			hbPayload["poll_imported"] = r.Imported
+			hbPayload["poll_ignored"] = r.Ignored
+			hbPayload["poll_pending"] = r.Pending
+			pay := copyPayload()
+			hbMu.Unlock()
+			_ = st.UpsertHeartbeat(context.Background(), "poller", pay)
 		},
 		func(r poller.SweepResult, err error) {
 			if err != nil {
 				log.Printf("sweep erro: %v", err)
+				hbMu.Lock()
+				hbPayload["sweep_error"] = err.Error()
+				pay := copyPayload()
+				hbMu.Unlock()
+				_ = st.UpsertHeartbeat(context.Background(), "poller", pay)
 				return
 			}
 			if r.Emitted > 0 {
 				log.Printf("sweep: encontradas=%d emitidas=%d dedup=%d", r.Found, r.Emitted, r.Skipped)
 			}
+			hbMu.Lock()
+			delete(hbPayload, "sweep_error")
+			hbPayload["sweep_found"] = r.Found
+			hbPayload["sweep_emitted"] = r.Emitted
+			hbPayload["sweep_skipped"] = r.Skipped
+			pay := copyPayload()
+			hbMu.Unlock()
+			_ = st.UpsertHeartbeat(context.Background(), "poller", pay)
 		},
 	)
 	log.Println("poller encerrado")
