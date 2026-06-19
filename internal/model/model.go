@@ -106,7 +106,6 @@ type Nota struct {
 	PendingAt        *time.Time `json:"pending_at,omitempty"` // visto no Athenas aguardando importação
 	ImportedAt       *time.Time `json:"imported_at,omitempty"`
 	ImportIgnored    bool       `json:"import_ignored"`
-	ViaRobo          bool       `json:"via_robo"` // true = importada via lote de robô (DATAROBO preenchido no Athenas)
 	MotivoIgnorado   string     `json:"motivo_ignorado,omitempty"`
 	FirstSeenAt      time.Time  `json:"first_seen_at"`
 	LastUpdateAt     time.Time  `json:"last_update_at"`

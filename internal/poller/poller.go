@@ -105,8 +105,7 @@ func (p *Poller) PollOnce(ctx context.Context) (Result, error) {
 		}
 		switch {
 		case st.Importado:
-			obs = append(obs, importObs(c, model.EventImported, now,
-				map[string]any{"via_robo": st.DataRobo != nil}, st))
+			obs = append(obs, importObs(c, model.EventImported, now, nil, st))
 			res.Imported++
 		case st.ImportIgnorada:
 			payload := map[string]any{}
@@ -221,8 +220,7 @@ func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, e
 		if !st.Importado {
 			continue
 		}
-		obs = append(obs, importObs(st.Chave, model.EventImported, now,
-			map[string]any{"via_robo": st.DataRobo != nil}, st))
+		obs = append(obs, importObs(st.Chave, model.EventImported, now, nil, st))
 	}
 	if len(obs) == 0 {
 		return res, nil

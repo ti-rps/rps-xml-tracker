@@ -692,7 +692,7 @@ const notaSelect = `
 	       arrived_at, synced_at, pending_at, imported_at, import_ignored, motivo_ignorado,
 	       first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
 	       cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
-	       empresa_nome, via_robo
+	       empresa_nome
 	FROM notas`
 
 func scanNota(r rowScanner) (model.Nota, error) {
@@ -702,7 +702,7 @@ func scanNota(r rowScanner) (model.Nota, error) {
 	err := r.Scan(&n.ChaveAcesso, &n.DocType, &n.Status, &n.CodigoEmpresa, &n.CodigoFilial,
 		&n.ArrivedAt, &n.SyncedAt, &n.PendingAt, &n.ImportedAt, &n.ImportIgnored, &motivo,
 		&n.FirstSeenAt, &n.LastUpdateAt, &n.LatArrivalSyncS, &n.LatSyncImportS,
-		&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &n.ValorTotal, &empNome, &n.ViaRobo)
+		&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &n.ValorTotal, &empNome)
 	if empNome != nil {
 		n.NomeEmpresa = *empNome
 	}
@@ -735,9 +735,9 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		   arrived_at, synced_at, imported_at, import_ignored, motivo_ignorado,
 		   first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
 		   cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
-		   empresa_nome, pending_at, via_robo)
+		   empresa_nome, pending_at)
 		VALUES ($1,$2::doc_type,$3::nota_status,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-		        $15,$16,$17,$18,$19::date,$20,$21,$22,$23)
+		        $15,$16,$17,$18,$19::date,$20,$21,$22)
 		ON CONFLICT (chave_acesso) DO UPDATE SET
 		  pending_at=EXCLUDED.pending_at,
 		  doc_type=EXCLUDED.doc_type, status=EXCLUDED.status,
@@ -753,14 +753,13 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		  destinatario_nome=COALESCE(EXCLUDED.destinatario_nome, notas.destinatario_nome),
 		  data_emissao=COALESCE(EXCLUDED.data_emissao, notas.data_emissao),
 		  valor_total=COALESCE(EXCLUDED.valor_total, notas.valor_total),
-		  empresa_nome=COALESCE(EXCLUDED.empresa_nome, notas.empresa_nome),
-		  via_robo=EXCLUDED.via_robo`,
+		  empresa_nome=COALESCE(EXCLUDED.empresa_nome, notas.empresa_nome)`,
 		n.ChaveAcesso, docTypeOrDefault(n.DocType), string(n.Status), n.CodigoEmpresa, n.CodigoFilial,
 		n.ArrivedAt, n.SyncedAt, n.ImportedAt, n.ImportIgnored, nullStr(n.MotivoIgnorado),
 		n.FirstSeenAt, n.LastUpdateAt, n.LatArrivalSyncS, n.LatSyncImportS,
 		nullStr(n.CnpjEmitente), nullStr(n.NomeEmitente), nullStr(n.CnpjDestinatario),
 		nullStr(n.NomeDestinatario), nullStr(n.DataEmissao), n.ValorTotal, nullStr(n.NomeEmpresa),
-		n.PendingAt, n.ViaRobo)
+		n.PendingAt)
 	return err
 }
 
