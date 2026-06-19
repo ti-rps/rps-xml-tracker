@@ -25,6 +25,17 @@ func (f fakeReader) Lookup(_ context.Context, chaves []string) (map[string]fireb
 	return out, nil
 }
 
+// SweepImported retorna todas as entradas importadas (ignora `since` — é um fake).
+func (f fakeReader) SweepImported(_ context.Context, _ time.Time) (map[string]firebird.ImportState, error) {
+	out := map[string]firebird.ImportState{}
+	for k, v := range f.states {
+		if v.Importado {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 func ptr(i int) *int { return &i }
 
 func seedArrival(t *testing.T, st store.Store, chave string) {
@@ -218,6 +229,41 @@ func TestPollOnce_FoundButPendingEmitsSeenPending(t *testing.T) {
 	}
 	if res2.Checked != 1 {
 		t.Fatalf("res2 = %+v, want checked=1 (pending segue sendo pollada)", res2)
+	}
+}
+
+func TestSweepOnce_EmitsImportedAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	seedArrival(t, st, "SW_IMPORTED")
+	seedArrival(t, st, "SW_PENDING")
+
+	fr := fakeReader{states: map[string]firebird.ImportState{
+		"SW_IMPORTED": {Found: true, Importado: true, Chave: "SW_IMPORTED"},
+		"SW_PENDING":  {Found: true, Importado: false, Chave: "SW_PENDING"},
+	}}
+	p := New(st, fr)
+	since := time.Now().Add(-1 * time.Hour)
+
+	res, err := p.SweepOnce(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Found != 1 || res.Emitted != 1 || res.Skipped != 0 {
+		t.Fatalf("sweep1: res=%+v, want Found=1 Emitted=1 Skipped=0", res)
+	}
+	d, _, _ := st.GetNota(ctx, "SW_IMPORTED")
+	if d.Status != model.StatusImported {
+		t.Errorf("status=%s, want imported", d.Status)
+	}
+
+	// segunda passada: dedup rejeita a observação duplicada
+	res2, err := p.SweepOnce(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Emitted != 0 || res2.Skipped != 1 {
+		t.Fatalf("sweep2 (dedup): res=%+v, want Emitted=0 Skipped=1", res2)
 	}
 }
 

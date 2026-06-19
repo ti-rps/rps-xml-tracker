@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/nakagami/firebirdsql"
 )
@@ -130,7 +131,42 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 		return err
 	}
 	defer rows.Close()
+	return scanRows(rows, rowsByChave)
+}
 
+// SweepImported retorna todas as chaves com IMPORTADO=1 e DATAROBO > since.
+// É O(importadas_recentes), independente do tamanho do backlog in-flight, e usa
+// o índice IDX4 (LOTEROBO, DATAROBO) do Firebird para a varredura por data.
+// Notas com DATAROBO=NULL (importadas sem passar pelo robô) NÃO são retornadas —
+// o poller rotacional as captura via ListInflightChaves.
+func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string]ImportState, error) {
+	q := `SELECT FIRST 10000
+	             t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
+	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME
+	      FROM TABLISTACHAVEACESSO t
+	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
+	      WHERE t.IMPORTADO = 1
+	        AND t.DATAROBO > ?`
+	rows, err := r.db.QueryContext(ctx, q, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rowsByChave := make(map[string][]EmpresaImport)
+	if err := scanRows(rows, rowsByChave); err != nil {
+		return nil, err
+	}
+	out := make(map[string]ImportState, len(rowsByChave))
+	for chave, rowList := range rowsByChave {
+		out[chave] = selectState(chave, rowList)
+	}
+	return out, nil
+}
+
+// scanRows escaneia as colunas padrão de TABLISTACHAVEACESSO (SELECT t.CHAVEACESSO,
+// t.IMPORTADO, ..., e.NOME) em dst. Compartilhado por lookupChunk e SweepImported.
+func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 	for rows.Next() {
 		var (
 			chave          string
@@ -178,7 +214,7 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 			v := valor.Float64
 			e.ValorTotal = &v
 		}
-		rowsByChave[chave] = append(rowsByChave[chave], e)
+		dst[chave] = append(dst[chave], e)
 	}
 	return rows.Err()
 }

@@ -35,6 +35,9 @@ func toUTF8(s string) string {
 // reader is the read-only Firebird capability the poller needs (interface for tests).
 type reader interface {
 	Lookup(ctx context.Context, chaves []string) (map[string]firebird.ImportState, error)
+	// SweepImported retorna chaves com IMPORTADO=1 e DATAROBO > since. É O(recentes)
+	// e não depende do tamanho do backlog in-flight — complementa a rotação do Lookup.
+	SweepImported(ctx context.Context, since time.Time) (map[string]firebird.ImportState, error)
 }
 
 // clock returns "now"; injectable for deterministic tests.
@@ -61,12 +64,19 @@ func (p *Poller) SetBatch(n int) {
 	}
 }
 
-// Result reports one cycle's outcome.
+// Result reports one poll cycle's outcome.
 type Result struct {
 	Checked  int
 	Imported int
 	Ignored  int
 	Pending  int
+}
+
+// SweepResult reports one sweep cycle's outcome.
+type SweepResult struct {
+	Found   int // chaves IMPORTADO=1 retornadas pelo Firebird
+	Emitted int // observações accepted pelo store (novas)
+	Skipped int // rejeitadas por dedup (já importadas no tracker)
 }
 
 // PollOnce runs a single cycle: in-flight chaves -> Firebird -> emit observations.
@@ -188,6 +198,72 @@ func (p *Poller) RepollImportIgnored(ctx context.Context, fixPending bool) (Repo
 		}
 	}
 	return res, nil
+}
+
+// SweepOnce pergunta ao Firebird o que foi importado desde `since` (via DATAROBO) e
+// emite observações 'imported' para cada achado. É O(importadas_recentes) — não
+// enumera o backlog in-flight. Observações já existentes são rejeitadas por dedup
+// (idempotente).
+func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, error) {
+	var res SweepResult
+	states, err := p.fb.SweepImported(ctx, since)
+	if err != nil {
+		return res, err
+	}
+	res.Found = len(states)
+	if res.Found == 0 {
+		return res, nil
+	}
+	now := p.now()
+	var obs []model.Observation
+	for _, st := range states {
+		if !st.Importado {
+			continue
+		}
+		obs = append(obs, importObs(st.Chave, model.EventImported, now, nil, st))
+	}
+	if len(obs) == 0 {
+		return res, nil
+	}
+	accepted, rejected, err := p.st.AppendObservations(ctx, obs)
+	if err != nil {
+		return res, err
+	}
+	res.Emitted = accepted
+	res.Skipped = rejected
+	return res, nil
+}
+
+// RunWithSweep é como Run mas também dispara um sweep ticker independente a cada
+// sweepInterval, olhando para trás sweepWindow via DATAROBO no Firebird. O sweep
+// captura importações recentes em O(recentes) sem depender da rotação do backlog.
+// Notas com DATAROBO=NULL (sem robô) seguem sendo capturadas pela rotação normal.
+// O sweepInterval=0 desabilita o sweep (equivale a Run).
+func (p *Poller) RunWithSweep(
+	ctx context.Context,
+	interval, sweepInterval, sweepWindow time.Duration,
+	onResult func(Result, error),
+	onSweep func(SweepResult, error),
+) {
+	if sweepInterval > 0 {
+		go func() {
+			t := time.NewTicker(sweepInterval)
+			defer t.Stop()
+			for {
+				since := p.now().Add(-sweepWindow)
+				sr, se := p.SweepOnce(ctx, since)
+				if onSweep != nil {
+					onSweep(sr, se)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
+			}
+		}()
+	}
+	p.Run(ctx, interval, onResult)
 }
 
 // Run loops PollOnce every interval until ctx is cancelled.

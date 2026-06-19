@@ -74,18 +74,45 @@ func main() {
 		}
 	}
 
+	sweepInterval := 5 * time.Minute
+	if v := os.Getenv("TRACKER_SWEEP_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			sweepInterval = d
+		}
+	}
+
+	sweepWindow := 4 * time.Hour
+	if v := os.Getenv("TRACKER_SWEEP_WINDOW"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			sweepWindow = d
+		}
+	}
+
 	p := poller.New(st, rd)
 	p.SetBatch(batch)
-	log.Printf("poller iniciando (intervalo %s, lote %d)", interval, batch)
-	p.Run(ctx, interval, func(r poller.Result, err error) {
-		if err != nil {
-			log.Printf("ciclo erro: %v", err)
-			return
-		}
-		if r.Checked > 0 {
-			log.Printf("ciclo: checadas=%d importadas=%d ignoradas=%d pendentes=%d", r.Checked, r.Imported, r.Ignored, r.Pending)
-		}
-	})
+	log.Printf("poller iniciando (intervalo %s, lote %d, sweep a cada %s janela %s)",
+		interval, batch, sweepInterval, sweepWindow)
+	p.RunWithSweep(ctx, interval, sweepInterval, sweepWindow,
+		func(r poller.Result, err error) {
+			if err != nil {
+				log.Printf("ciclo erro: %v", err)
+				return
+			}
+			if r.Checked > 0 {
+				log.Printf("ciclo: checadas=%d importadas=%d ignoradas=%d pendentes=%d",
+					r.Checked, r.Imported, r.Ignored, r.Pending)
+			}
+		},
+		func(r poller.SweepResult, err error) {
+			if err != nil {
+				log.Printf("sweep erro: %v", err)
+				return
+			}
+			if r.Emitted > 0 {
+				log.Printf("sweep: encontradas=%d emitidas=%d dedup=%d", r.Found, r.Emitted, r.Skipped)
+			}
+		},
+	)
 	log.Println("poller encerrado")
 }
 
