@@ -7,6 +7,7 @@
 //	TRACKER_STORE    postgres (default) | memory
 //	TRACKER_PG_DSN   Postgres DSN (when TRACKER_STORE=postgres)
 //	TRACKER_POLL_INTERVAL  e.g. 30s (default)
+//	TRACKER_POLL_BATCH     chaves in-flight por ciclo (default 8000)
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -63,16 +65,54 @@ func main() {
 		}
 	}
 
-	log.Printf("poller iniciando (intervalo %s)", interval)
-	poller.New(st, rd).Run(ctx, interval, func(r poller.Result, err error) {
-		if err != nil {
-			log.Printf("ciclo erro: %v", err)
-			return
+	// Chaves in-flight checadas por ciclo. Default alto (8000) p/ drenar backlogs
+	// grandes (milhões de in-flight) — a rotação cai de horas p/ ~1-2h. Tunável.
+	batch := 8000
+	if v := os.Getenv("TRACKER_POLL_BATCH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			batch = n
 		}
-		if r.Checked > 0 {
-			log.Printf("ciclo: checadas=%d importadas=%d ignoradas=%d pendentes=%d", r.Checked, r.Imported, r.Ignored, r.Pending)
+	}
+
+	sweepInterval := 5 * time.Minute
+	if v := os.Getenv("TRACKER_SWEEP_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			sweepInterval = d
 		}
-	})
+	}
+
+	sweepWindow := 4 * time.Hour
+	if v := os.Getenv("TRACKER_SWEEP_WINDOW"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			sweepWindow = d
+		}
+	}
+
+	p := poller.New(st, rd)
+	p.SetBatch(batch)
+	log.Printf("poller iniciando (intervalo %s, lote %d, sweep a cada %s janela %s)",
+		interval, batch, sweepInterval, sweepWindow)
+	p.RunWithSweep(ctx, interval, sweepInterval, sweepWindow,
+		func(r poller.Result, err error) {
+			if err != nil {
+				log.Printf("ciclo erro: %v", err)
+				return
+			}
+			if r.Checked > 0 {
+				log.Printf("ciclo: checadas=%d importadas=%d ignoradas=%d pendentes=%d",
+					r.Checked, r.Imported, r.Ignored, r.Pending)
+			}
+		},
+		func(r poller.SweepResult, err error) {
+			if err != nil {
+				log.Printf("sweep erro: %v", err)
+				return
+			}
+			if r.Emitted > 0 {
+				log.Printf("sweep: encontradas=%d emitidas=%d dedup=%d", r.Found, r.Emitted, r.Skipped)
+			}
+		},
+	)
 	log.Println("poller encerrado")
 }
 

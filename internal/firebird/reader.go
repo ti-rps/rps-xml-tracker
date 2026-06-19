@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	_ "github.com/nakagami/firebirdsql"
 )
@@ -42,6 +43,7 @@ type EmpresaImport struct {
 	NomeDestinatario string
 	DataEmissao      string // yyyy-mm-dd
 	ValorTotal       *float64
+	DataRobo         *time.Time // quando o robô importou (DATAROBO); nil se não passou pelo robô
 }
 
 // ImportState is the import status of one chave, resolved to the ONE empresa row
@@ -65,6 +67,7 @@ type ImportState struct {
 	NomeDestinatario string
 	DataEmissao      string // yyyy-mm-dd
 	ValorTotal       *float64
+	DataRobo         *time.Time // quando o robô importou (DATAROBO da linha selecionada)
 	// Rows são TODAS as linhas (uma por empresa) que o Athenas tem para a chave.
 	Rows []EmpresaImport
 }
@@ -121,7 +124,7 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 	}
 	q := `SELECT t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
 	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
-	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO
 	      FROM TABLISTACHAVEACESSO t
 	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
 	      WHERE t.CHAVEACESSO IN (` + placeholders + `)`
@@ -130,7 +133,42 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 		return err
 	}
 	defer rows.Close()
+	return scanRows(rows, rowsByChave)
+}
 
+// SweepImported retorna todas as chaves com IMPORTADO=1 e DATAROBO > since.
+// É O(importadas_recentes), independente do tamanho do backlog in-flight, e usa
+// o índice IDX4 (LOTEROBO, DATAROBO) do Firebird para a varredura por data.
+// Notas com DATAROBO=NULL (importadas sem passar pelo robô) NÃO são retornadas —
+// o poller rotacional as captura via ListInflightChaves.
+func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string]ImportState, error) {
+	q := `SELECT FIRST 10000
+	             t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
+	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO
+	      FROM TABLISTACHAVEACESSO t
+	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
+	      WHERE t.IMPORTADO = 1
+	        AND t.DATAROBO > ?`
+	rows, err := r.db.QueryContext(ctx, q, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rowsByChave := make(map[string][]EmpresaImport)
+	if err := scanRows(rows, rowsByChave); err != nil {
+		return nil, err
+	}
+	out := make(map[string]ImportState, len(rowsByChave))
+	for chave, rowList := range rowsByChave {
+		out[chave] = selectState(chave, rowList)
+	}
+	return out, nil
+}
+
+// scanRows escaneia as colunas padrão de TABLISTACHAVEACESSO (SELECT t.CHAVEACESSO,
+// t.IMPORTADO, ..., e.NOME, t.DATAROBO) em dst. Compartilhado por lookupChunk e SweepImported.
+func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 	for rows.Next() {
 		var (
 			chave          string
@@ -142,9 +180,10 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 			emissao        sql.NullTime
 			valor          sql.NullFloat64
 			nomeEmpresa    sql.NullString
+			dataRobo       sql.NullTime
 		)
 		if err := rows.Scan(&chave, &imp, &ign, &motivo, &sit, &tipo,
-			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor, &nomeEmpresa); err != nil {
+			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor, &nomeEmpresa, &dataRobo); err != nil {
 			return err
 		}
 		chave = strings.TrimSpace(chave)
@@ -178,7 +217,11 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 			v := valor.Float64
 			e.ValorTotal = &v
 		}
-		rowsByChave[chave] = append(rowsByChave[chave], e)
+		if dataRobo.Valid {
+			t := dataRobo.Time
+			e.DataRobo = &t
+		}
+		dst[chave] = append(dst[chave], e)
 	}
 	return rows.Err()
 }
@@ -267,6 +310,7 @@ func applyMeta(st *ImportState, rep EmpresaImport, rows []EmpresaImport) {
 	st.NomeDestinatario = rep.NomeDestinatario
 	st.DataEmissao = rep.DataEmissao
 	st.ValorTotal = rep.ValorTotal
+	st.DataRobo = rep.DataRobo
 	for _, e := range rows {
 		setIfEmpty(&st.TipoDocumento, e.TipoDocumento)
 		setIfEmpty(&st.CnpjEmitente, e.CnpjEmitente)
