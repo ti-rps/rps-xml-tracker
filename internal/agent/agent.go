@@ -124,8 +124,9 @@ type Result struct {
 }
 
 const (
-	flushSeenEvery = 2000 // grava o estado bbolt em lotes (não 1 transação/arquivo)
-	progressEvery  = 5000 // loga progresso a cada N arquivos escaneados
+	flushSeenEvery     = 2000             // grava o estado bbolt em lotes (não 1 transação/arquivo)
+	progressEvery      = 5000             // loga progresso a cada N arquivos escaneados
+	spoolFlushInterval = 90 * time.Second // reenvia o spool no próprio ticker (não só no início da varredura)
 )
 
 // ScanOnce flushes any spooled batches, then scans ALL roots once (arrival+sync
@@ -455,5 +456,24 @@ func (a *Agent) RunSplit(ctx context.Context, arrivalInterval, syncInterval time
 		wg.Add(1)
 		go loop(&wg, "sync", syncRoots, syncInterval)
 	}
+
+	// Flush do spool no PRÓPRIO ticker (e já na partida): com as varreduras longas, os
+	// lotes spoolados não podem esperar o fim do ciclo p/ serem reenviados. Drena assim
+	// que o agente sobe e a cada spoolFlushInterval.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(spoolFlushInterval)
+		defer t.Stop()
+		for {
+			a.flushSpoolSafe(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+
 	wg.Wait()
 }
