@@ -48,18 +48,8 @@ func (c *Cached) Warm(ctx context.Context) {
 	}
 	_, _, _ = c.Empresas(ctx, EmpresaFilter{}) // tab Empresas (todas)
 	_, _, _ = c.Empresas(ctx, EmpresaFilter{PendentesOnly: true, Sort: "pendentes"})
-	_, _ = c.DocTypes(ctx)
 	_, _ = c.BacklogAge(ctx)
-}
-
-func (c *Cached) DocTypes(ctx context.Context) ([]model.DocTypeCount, error) {
-	v, err := c.get("doctypes", func(cctx context.Context) (any, error) {
-		return c.Store.DocTypes(cctx)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.([]model.DocTypeCount), nil
+	// DocTypes não é aquecido nem cacheado: lê do contador (notas_counts), instantâneo.
 }
 
 func (c *Cached) BacklogAge(ctx context.Context) ([]model.BacklogBucket, error) {
