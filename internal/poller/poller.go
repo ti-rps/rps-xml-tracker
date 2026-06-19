@@ -284,11 +284,17 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration, onResult func(
 }
 
 func importObs(chave, event string, now time.Time, payload map[string]any, st firebird.ImportState) model.Observation {
+	// ObservedAt = hora real do robô (DATAROBO) quando disponível; fallback p/ hora
+	// de detecção. Isso faz o imported_at do tracker bater com o timestamp do Athenas.
+	observedAt := now
+	if event == model.EventImported && st.DataRobo != nil {
+		observedAt = *st.DataRobo
+	}
 	return model.Observation{
 		ChaveAcesso: chave,
 		Stage:       model.StageImport,
 		EventType:   event,
-		ObservedAt:  now, // transição detectada agora ~= imported_at (Fase 0)
+		ObservedAt:  observedAt,
 		IngestedAt:  now,
 		Source:      "poller:firebird",
 		Payload:     payload,

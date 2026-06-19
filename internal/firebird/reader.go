@@ -43,6 +43,7 @@ type EmpresaImport struct {
 	NomeDestinatario string
 	DataEmissao      string // yyyy-mm-dd
 	ValorTotal       *float64
+	DataRobo         *time.Time // quando o robô importou (DATAROBO); nil se não passou pelo robô
 }
 
 // ImportState is the import status of one chave, resolved to the ONE empresa row
@@ -66,6 +67,7 @@ type ImportState struct {
 	NomeDestinatario string
 	DataEmissao      string // yyyy-mm-dd
 	ValorTotal       *float64
+	DataRobo         *time.Time // quando o robô importou (DATAROBO da linha selecionada)
 	// Rows são TODAS as linhas (uma por empresa) que o Athenas tem para a chave.
 	Rows []EmpresaImport
 }
@@ -122,7 +124,7 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 	}
 	q := `SELECT t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
 	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
-	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO
 	      FROM TABLISTACHAVEACESSO t
 	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
 	      WHERE t.CHAVEACESSO IN (` + placeholders + `)`
@@ -143,7 +145,7 @@ func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string
 	q := `SELECT FIRST 10000
 	             t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
 	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
-	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO
 	      FROM TABLISTACHAVEACESSO t
 	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
 	      WHERE t.IMPORTADO = 1
@@ -165,7 +167,7 @@ func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string
 }
 
 // scanRows escaneia as colunas padrão de TABLISTACHAVEACESSO (SELECT t.CHAVEACESSO,
-// t.IMPORTADO, ..., e.NOME) em dst. Compartilhado por lookupChunk e SweepImported.
+// t.IMPORTADO, ..., e.NOME, t.DATAROBO) em dst. Compartilhado por lookupChunk e SweepImported.
 func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 	for rows.Next() {
 		var (
@@ -178,9 +180,10 @@ func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 			emissao        sql.NullTime
 			valor          sql.NullFloat64
 			nomeEmpresa    sql.NullString
+			dataRobo       sql.NullTime
 		)
 		if err := rows.Scan(&chave, &imp, &ign, &motivo, &sit, &tipo,
-			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor, &nomeEmpresa); err != nil {
+			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor, &nomeEmpresa, &dataRobo); err != nil {
 			return err
 		}
 		chave = strings.TrimSpace(chave)
@@ -213,6 +216,10 @@ func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 		if valor.Valid {
 			v := valor.Float64
 			e.ValorTotal = &v
+		}
+		if dataRobo.Valid {
+			t := dataRobo.Time
+			e.DataRobo = &t
 		}
 		dst[chave] = append(dst[chave], e)
 	}
@@ -303,6 +310,7 @@ func applyMeta(st *ImportState, rep EmpresaImport, rows []EmpresaImport) {
 	st.NomeDestinatario = rep.NomeDestinatario
 	st.DataEmissao = rep.DataEmissao
 	st.ValorTotal = rep.ValorTotal
+	st.DataRobo = rep.DataRobo
 	for _, e := range rows {
 		setIfEmpty(&st.TipoDocumento, e.TipoDocumento)
 		setIfEmpty(&st.CnpjEmitente, e.CnpjEmitente)
