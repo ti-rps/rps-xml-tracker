@@ -542,24 +542,28 @@ func orderedBacklog(counts map[string]int) []model.BacklogBucket {
 }
 
 func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
-	// pendentes = itens não-terminais (espelha pendentes() do store em memória).
-	const pend = "count(*) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck'))"
+	// Lê do contador mantido empresa_counts (migração 00011) — instantâneo, sem o
+	// GROUP BY codigo_empresa sobre as 14M da notas (era ~30s, só cacheado). As chaves
+	// usam sentinela -1 p/ NULL (empresa/filial); o read traduz com NULLIF(coluna,-1).
+	// pendentes = itens não-terminais (espelha pendentes() do store em memória); como
+	// FILTER sobre sum() pode dar NULL, COALESCE p/ 0.
+	const pend = "COALESCE(sum(n) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck')),0)"
 	having := ""
 	if f.PendentesOnly {
 		having = "HAVING " + pend + " > 0"
 	}
-	// Notas sem empresa identificada (codigo_empresa NULL) colapsam numa única
-	// linha "Sem empresa": fil é forçado a NULL p/ não fragmentar por filial.
-	order := "codigo_empresa, fil"
+	// Ordena por código com NULL (sentinela -1 -> NULLIF) por último, espelhando o
+	// NULLS LAST / codigoLess do store em memória.
+	order := "NULLIF(codigo_empresa,-1) NULLS LAST, NULLIF(codigo_filial,-1) NULLS LAST"
 	if f.Sort == "pendentes" {
-		order = pend + " DESC, codigo_empresa, fil"
+		order = pend + " DESC, " + order
 	}
 	args := []any{}
 	where := ""
 	if f.Query != "" {
 		args = append(args, "%"+f.Query+"%")
-		// trigram (idx_notas_empresa_nome_trgm) -> corta o conjunto antes do GROUP BY.
-		where = fmt.Sprintf("WHERE empresa_nome ILIKE $%d", len(args))
+		// empresa_counts tem poucos milhares de linhas -> ILIKE direto é instantâneo.
+		where = fmt.Sprintf("WHERE nome ILIKE $%d", len(args))
 	}
 	limit := ""
 	if f.Limit > 0 {
@@ -569,20 +573,20 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 	// count(*) OVER () é avaliado após GROUP BY/HAVING e antes do LIMIT, então dá
 	// o total de empresas que casam o filtro (para paginação).
 	q := fmt.Sprintf(`
-		SELECT codigo_empresa,
-		  CASE WHEN codigo_empresa IS NULL THEN NULL ELSE codigo_filial END AS fil,
-		  COALESCE(max(empresa_nome), ''),
-		  count(*) FILTER (WHERE status='arrived'),
-		  count(*) FILTER (WHERE status='synced'),
-		  count(*) FILTER (WHERE status='imported'),
-		  count(*) FILTER (WHERE status='import_ignored'),
-		  count(*) FILTER (WHERE status='pending_import'),
-		  count(*) FILTER (WHERE status='stuck'),
-		  count(*) FILTER (WHERE status='lost'),
+		SELECT NULLIF(codigo_empresa,-1),
+		  NULLIF(codigo_filial,-1) AS fil,
+		  COALESCE(max(nome), ''),
+		  COALESCE(sum(n) FILTER (WHERE status='arrived'),0),
+		  COALESCE(sum(n) FILTER (WHERE status='synced'),0),
+		  COALESCE(sum(n) FILTER (WHERE status='imported'),0),
+		  COALESCE(sum(n) FILTER (WHERE status='import_ignored'),0),
+		  COALESCE(sum(n) FILTER (WHERE status='pending_import'),0),
+		  COALESCE(sum(n) FILTER (WHERE status='stuck'),0),
+		  COALESCE(sum(n) FILTER (WHERE status='lost'),0),
 		  count(*) OVER ()
-		FROM notas
+		FROM empresa_counts
 		%s
-		GROUP BY codigo_empresa, fil
+		GROUP BY codigo_empresa, codigo_filial
 		%s
 		ORDER BY %s
 		%s`, where, having, order, limit)
