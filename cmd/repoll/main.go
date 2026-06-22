@@ -18,6 +18,7 @@ import (
 	"flag"
 	"log"
 	"os"
+	"time"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/firebird"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/poller"
@@ -29,6 +30,11 @@ func main() {
 	// import_ignored errada (de terceiro) das que hoje resolvem p/ pendente, fazendo-as
 	// voltar a aguardando importação. DESTRUTIVO (apaga observações) — opt-in explícito.
 	fixPending := flag.Bool("fix-pending", false, "também corrige as presas em ignorada que na verdade estão pendentes (remove a observação errada)")
+	// --fix-imported-at: modo separado — corrige retroativamente o fuso do imported_at
+	// das notas importadas desde --since, re-lendo o Firebird. DESTRUTIVO (reescreve
+	// observed_at). Não faz o repoll de import_ignored (é um modo à parte).
+	fixImportedAt := flag.Bool("fix-imported-at", false, "corrige retroativamente o fuso do imported_at das notas importadas desde --since")
+	since := flag.String("since", "", "janela da correção do imported_at (YYYY-MM-DD); vazio = últimos 30 dias")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -53,6 +59,25 @@ func main() {
 		log.Fatalf("postgres: %v", err)
 	}
 	defer pg.Close()
+
+	if *fixImportedAt {
+		from := time.Now().AddDate(0, 0, -30)
+		if *since != "" {
+			t, err := time.ParseInLocation("2006-01-02", *since, time.Local)
+			if err != nil {
+				log.Fatalf("--since inválido (use YYYY-MM-DD): %v", err)
+			}
+			from = t
+		}
+		log.Printf("repoll: corrigindo o fuso do imported_at das notas importadas desde %s...", from.Format("2006-01-02"))
+		res, err := poller.New(pg, rd).FixImportedAt(ctx, from)
+		if err != nil {
+			log.Fatalf("fix-imported-at: %v (parcial: %+v)", err, res)
+		}
+		log.Printf("fix-imported-at concluído: checadas=%d corrigidas=%d já_ok=%d sem_data_firebird=%d sumidas=%d",
+			res.Checked, res.Corrected, res.AlreadyOK, res.NoFirebird, res.NotFound)
+		return
+	}
 
 	mode := "padrão (append-only)"
 	if *fixPending {

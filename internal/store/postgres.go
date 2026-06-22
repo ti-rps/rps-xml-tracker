@@ -327,6 +327,61 @@ func (p *Postgres) DeleteImportIgnoredObs(ctx context.Context, chave string) (in
 	return n, nil
 }
 
+func (p *Postgres) ListChavesImportedSince(ctx context.Context, since time.Time) ([]string, error) {
+	rows, err := p.pool.Query(ctx,
+		`SELECT chave_acesso FROM notas
+		 WHERE status='imported'::nota_status AND imported_at >= $1
+		 ORDER BY imported_at`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (p *Postgres) UpdateImportedObservedAt(ctx context.Context, chave string, observedAt time.Time) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after Commit
+
+	// só atualiza se o valor mudar (idempotente; re-rodar não reescreve nada).
+	tag, err := tx.Exec(ctx,
+		`UPDATE observations SET observed_at=$2
+		 WHERE chave_acesso=$1 AND stage='import'::stage AND event_type=$3
+		   AND observed_at IS DISTINCT FROM $2`,
+		chave, observedAt, model.EventImported)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, tx.Commit(ctx) // nada a corrigir
+	}
+	// re-deriva a nota (imported_at acompanha o novo observed_at).
+	spans, err := loadObservations(ctx, tx, chave)
+	if err != nil {
+		return false, err
+	}
+	if len(spans) > 0 {
+		if err := upsertNota(ctx, tx, derive.Nota(chave, spans)); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // latencyWindow é a janela móvel dos percentis de latência do overview. Recorta
 // fora o backfill histórico (arrived_at = ModTime antigo) e dá uma leitura de SLA
 // "atual" em vez de all-time. Ajuste aqui se o produto quiser outro horizonte.

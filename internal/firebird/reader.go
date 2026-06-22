@@ -96,6 +96,27 @@ func (r *Reader) Close() error { return r.db.Close() }
 // chunkSize keeps each IN (...) well under Firebird's parameter limit.
 const chunkSize = 400
 
+// brLoc é o fuso do Athenas (horário de Brasília). Carregado uma vez; sem tzdata no
+// container, cai num offset fixo -03:00 (o Brasil não tem mais horário de verão desde
+// 2019, então é constante para as datas que importam aqui).
+var brLoc = func() *time.Location {
+	if loc, err := time.LoadLocation("America/Sao_Paulo"); err == nil {
+		return loc
+	}
+	return time.FixedZone("-03", -3*3600)
+}()
+
+// fbLocalTime reinterpreta um TIMESTAMP do Firebird como horário de Brasília. Os
+// TIMESTAMP do Athenas são naive (sem fuso) e gravados em horário local; o driver os
+// devolve com os componentes corretos do wall-clock mas rotulados como UTC, o que
+// deslocaria o INSTANTE em 3h ao gravar no timestamptz do Postgres (e cruzaria a virada
+// do dia em valores date-only/madrugada — ex.: a data 19/06 virava 18/06 21:00 BRT).
+// Reconstruímos a partir dos componentes (que o driver preserva) fixando o fuso BRT, o
+// que é idempotente independentemente do fuso que o driver tenha atribuído.
+func fbLocalTime(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), brLoc)
+}
+
 // Lookup returns the import state for each chave found. Chaves absent from the
 // result map were not found in Athenas. READ-ONLY (SELECT only). A chave may have
 // several rows (one per empresa); they are collected and then resolved to one
@@ -226,11 +247,11 @@ func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 			e.ValorTotal = &v
 		}
 		if dataRobo.Valid {
-			t := dataRobo.Time
+			t := fbLocalTime(dataRobo.Time)
 			e.DataRobo = &t
 		}
 		if dataInclusao.Valid {
-			t := dataInclusao.Time
+			t := fbLocalTime(dataInclusao.Time)
 			e.DataInclusao = &t
 		}
 		dst[chave] = append(dst[chave], e)

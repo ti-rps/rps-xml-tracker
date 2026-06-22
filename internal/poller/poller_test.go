@@ -183,6 +183,58 @@ func TestRepollImportIgnored_FixPendingRevertsToPending(t *testing.T) {
 	}
 }
 
+func TestFixImportedAt_CorrectsTimezone(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+
+	buggy := time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC)      // date-only lido como UTC (bug)
+	fixed := time.Date(2026, 6, 19, 3, 0, 0, 0, time.UTC)      // = 19/06 00:00 BRT (correto)
+	detection := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC) // hora de detecção (sem data no FB)
+
+	seed := func(chave string, at time.Time) {
+		t.Helper()
+		seedArrival(t, st, chave)
+		if _, _, err := st.AppendObservations(ctx, []model.Observation{{
+			ChaveAcesso: chave, Stage: model.StageImport, EventType: model.EventImported,
+			ObservedAt: at, Source: "poller:firebird",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("FIX_ME", buggy)
+	seed("NO_FB_DATE", detection)
+
+	fr := fakeReader{states: map[string]firebird.ImportState{
+		"FIX_ME":     {Found: true, Importado: true, DataInclusao: &fixed},
+		"NO_FB_DATE": {Found: true, Importado: true}, // sem DATAROBO/DATAINCLUSAO
+	}}
+	p := New(st, fr)
+	since := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	res, err := p.FixImportedAt(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Checked != 2 || res.Corrected != 1 || res.NoFirebird != 1 {
+		t.Fatalf("res=%+v want checked=2 corrected=1 noFirebird=1", res)
+	}
+	if d, _, _ := st.GetNota(ctx, "FIX_ME"); d.ImportedAt == nil || !d.ImportedAt.Equal(fixed) {
+		t.Errorf("FIX_ME imported_at=%v want %v (corrigido)", d.ImportedAt, fixed)
+	}
+	if d, _, _ := st.GetNota(ctx, "NO_FB_DATE"); d.ImportedAt == nil || !d.ImportedAt.Equal(detection) {
+		t.Errorf("NO_FB_DATE imported_at=%v want intacto %v", d.ImportedAt, detection)
+	}
+
+	// idempotente: segunda passada não reescreve nada.
+	res2, err := p.FixImportedAt(ctx, since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res2.Corrected != 0 || res2.AlreadyOK != 1 {
+		t.Fatalf("res2=%+v want corrected=0 alreadyOK=1 (idempotente)", res2)
+	}
+}
+
 func TestToUTF8(t *testing.T) {
 	// Latin-1 cru do Firebird (charset=NONE): 0xC1='Á' + 'R' -> "ÁR" UTF-8 válido.
 	got := toUTF8(string([]byte{0xc1, 0x52}))

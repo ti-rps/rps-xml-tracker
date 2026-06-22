@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 )
@@ -35,6 +36,15 @@ type Store interface {
 	// erradamente terminais (terceiro ignorou antes de a dona importar). Retorna
 	// quantas observações removeu.
 	DeleteImportIgnoredObs(ctx context.Context, chave string) (int, error)
+
+	// ListChavesImportedSince retorna as chaves com status imported cujo imported_at
+	// é >= since. Para a correção retroativa do imported_at (janela recente).
+	ListChavesImportedSince(ctx context.Context, since time.Time) ([]string, error)
+
+	// UpdateImportedObservedAt reescreve o observed_at da observação 'imported' de uma
+	// chave (e re-deriva a nota) quando difere do valor dado; retorna se mudou.
+	// DESTRUTIVO: usado só na correção retroativa do fuso do imported_at.
+	UpdateImportedObservedAt(ctx context.Context, chave string, observedAt time.Time) (bool, error)
 
 	// Overview returns the dashboard summary cards.
 	Overview(ctx context.Context) (model.Overview, error)
