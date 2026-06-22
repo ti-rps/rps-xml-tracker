@@ -200,6 +200,66 @@ func (p *Poller) RepollImportIgnored(ctx context.Context, fixPending bool) (Repo
 	return res, nil
 }
 
+// FixImportedResult reporta a correção retroativa do imported_at (fuso).
+type FixImportedResult struct {
+	Checked    int // chaves imported na janela
+	Corrected  int // observed_at do imported reescrito (fuso/data corrigidos)
+	AlreadyOK  int // já estava com o valor certo (idempotente)
+	NoFirebird int // sem DATAROBO/DATAINCLUSAO no Firebird -> mantém a detecção (now)
+	NotFound   int // sumiu do Firebird
+}
+
+// FixImportedAt re-lê o Firebird das notas imported desde `since` e reescreve o
+// observed_at do evento 'imported' para o valor de DATAROBO/DATAINCLUSAO (já com o
+// fuso certo — o reader aplica fbLocalTime). Notas sem data no Firebird são puladas
+// (mantêm a hora de detecção). É a correção retroativa do bug de fuso do imported_at:
+// o poller normal não revisita notas terminais e o dedup bloquearia uma reemissão.
+// DESTRUTIVO: reescreve observed_at. One-off (cmd/repoll --fix-imported-at).
+func (p *Poller) FixImportedAt(ctx context.Context, since time.Time) (FixImportedResult, error) {
+	var res FixImportedResult
+	chaves, err := p.st.ListChavesImportedSince(ctx, since)
+	if err != nil {
+		return res, err
+	}
+	for start := 0; start < len(chaves); start += p.batch {
+		end := start + p.batch
+		if end > len(chaves) {
+			end = len(chaves)
+		}
+		batch := chaves[start:end]
+		states, err := p.fb.Lookup(ctx, batch)
+		if err != nil {
+			return res, err
+		}
+		for _, c := range batch {
+			res.Checked++
+			st, ok := states[c]
+			switch {
+			case !ok:
+				res.NotFound++
+			case st.DataRobo == nil && st.DataInclusao == nil:
+				res.NoFirebird++
+			default:
+				// mesma precedência da cascata do importObs: DATAROBO antes de DATAINCLUSAO.
+				at := st.DataInclusao
+				if st.DataRobo != nil {
+					at = st.DataRobo
+				}
+				changed, err := p.st.UpdateImportedObservedAt(ctx, c, *at)
+				if err != nil {
+					return res, err
+				}
+				if changed {
+					res.Corrected++
+				} else {
+					res.AlreadyOK++
+				}
+			}
+		}
+	}
+	return res, nil
+}
+
 // SweepOnce pergunta ao Firebird quais notas inseridas desde `since` já estão
 // IMPORTADO=1 (via DATAINCLUSAO, sempre preenchido) e emite observações 'imported'
 // para cada achado. É O(inseridas_recentes) — não enumera o backlog in-flight.

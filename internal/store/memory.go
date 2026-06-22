@@ -155,6 +155,34 @@ func (m *Memory) DeleteImportIgnoredObs(_ context.Context, chave string) (int, e
 	return n, nil // notas são derivadas na leitura — nada a recomputar
 }
 
+func (m *Memory) ListChavesImportedSince(_ context.Context, since time.Time) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []string
+	for _, n := range m.allNotas() {
+		if n.Status == model.StatusImported && n.ImportedAt != nil && !n.ImportedAt.Before(since) {
+			out = append(out, n.ChaveAcesso)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (m *Memory) UpdateImportedObservedAt(_ context.Context, chave string, observedAt time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	changed := false
+	for i := range m.obs {
+		o := &m.obs[i]
+		if o.ChaveAcesso == chave && o.Stage == model.StageImport &&
+			o.EventType == model.EventImported && !o.ObservedAt.Equal(observedAt) {
+			o.ObservedAt = observedAt
+			changed = true
+		}
+	}
+	return changed, nil // notas são derivadas na leitura
+}
+
 func (m *Memory) allNotas() []model.Nota {
 	byChave := map[string][]model.Observation{}
 	for _, o := range m.obs {
