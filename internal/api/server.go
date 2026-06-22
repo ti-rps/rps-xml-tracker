@@ -172,6 +172,9 @@ func (s *Server) handleEmpresas(c *gin.Context) {
 		PendentesOnly: c.Query("pendentes") == "true",
 		Query:         c.Query("q"),
 		Sort:          c.Query("sort"),
+		DateField:     c.Query("date_field"),            // emissao|arrived|synced|imported
+		From:          c.Query("from"),                  // yyyy-mm-dd (inclusive)
+		To:            c.Query("to"),                    // yyyy-mm-dd (inclusive)
 		Limit:         atoiDefault(c.Query("limit"), 0), // 0 = todas (sem paginação)
 		Offset:        atoiDefault(c.Query("offset"), 0),
 	}

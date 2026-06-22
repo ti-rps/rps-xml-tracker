@@ -3,11 +3,8 @@ package store
 import (
 	"context"
 	"os"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 )
@@ -23,7 +20,7 @@ func TestPostgresStore(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	applyMigration(t, ctx, dsn)
+	applyAllMigrations(t, ctx, dsn)
 	pg, err := NewPostgres(ctx, dsn)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -71,36 +68,3 @@ func TestPostgresStore(t *testing.T) {
 	}
 }
 
-func applyMigration(t *testing.T, ctx context.Context, dsn string) {
-	t.Helper()
-	sql, err := os.ReadFile("../../migrations/00001_init.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	up := string(sql)
-	if i := strings.Index(up, "-- +goose Down"); i >= 0 {
-		up = up[:i]
-	}
-	up = strings.ReplaceAll(up, "-- +goose Up", "")
-
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	defer pool.Close()
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire: %v", err)
-	}
-	defer conn.Release()
-
-	// clean slate + migration via the SIMPLE protocol (allows multi-statement).
-	clean := `DROP TABLE IF EXISTS firebird_cursor, nfse_import, notas, observations, empresas CASCADE;
-		DROP TYPE IF EXISTS nota_status, stage, doc_type;`
-	if err := conn.Conn().PgConn().Exec(ctx, clean).Close(); err != nil {
-		t.Fatalf("clean: %v", err)
-	}
-	if err := conn.Conn().PgConn().Exec(ctx, up).Close(); err != nil {
-		t.Fatalf("apply migration: %v", err)
-	}
-}

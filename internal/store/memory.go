@@ -323,6 +323,11 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 	}
 	agg := map[key]*model.EmpresaAgg{}
 	for _, n := range m.allNotas() {
+		// janela de data (date_field from/to): só conta notas cujo campo escolhido cai
+		// no período. Sem janela, conta todas (paridade com o caminho do contador).
+		if !inDateWindow(n, f.DateField, f.From, f.To) {
+			continue
+		}
 		// Notas sem empresa colapsam numa única linha "Sem empresa" (emp/fil NULL).
 		var k key
 		var a *model.EmpresaAgg
@@ -483,17 +488,28 @@ func matches(n model.Nota, f NotaFilter) bool {
 	if f.ChaveQuery != "" && !strings.Contains(n.ChaveAcesso, f.ChaveQuery) {
 		return false
 	}
-	if col := dateColumn(f.DateField); col != "" && (f.From != "" || f.To != "") {
-		d := notaDate(n, f.DateField)
-		if d == "" {
-			return false
-		}
-		if f.From != "" && d < f.From {
-			return false
-		}
-		if f.To != "" && d > f.To {
-			return false
-		}
+	if !inDateWindow(n, f.DateField, f.From, f.To) {
+		return false
+	}
+	return true
+}
+
+// inDateWindow reports whether n cai na janela [from,to] do date_field (calendar-day,
+// yyyy-mm-dd). Sem date_field/janela -> sempre true. Espelha o filtro de data do
+// GET /notas; compartilhado por ListNotas e Empresas.
+func inDateWindow(n model.Nota, field, from, to string) bool {
+	if col := dateColumn(field); col == "" || (from == "" && to == "") {
+		return true
+	}
+	d := notaDate(n, field)
+	if d == "" {
+		return false
+	}
+	if from != "" && d < from {
+		return false
+	}
+	if to != "" && d > to {
+		return false
 	}
 	return true
 }
