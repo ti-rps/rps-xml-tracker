@@ -542,11 +542,44 @@ func orderedBacklog(counts map[string]int) []model.BacklogBucket {
 }
 
 func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
-	// Lê do contador mantido empresa_counts (migração 00011) — instantâneo, sem o
-	// GROUP BY codigo_empresa sobre as 14M da notas (era ~30s, só cacheado). As chaves
-	// usam sentinela -1 p/ NULL (empresa/filial); o read traduz com NULLIF(coluna,-1).
-	// pendentes = itens não-terminais (espelha pendentes() do store em memória); como
-	// FILTER sobre sum() pode dar NULL, COALESCE p/ 0.
+	// Sem janela de data -> lê do contador (instantâneo). Com date_field+from/to ->
+	// recomputa ao vivo da notas (o contador não tem dimensão temporal). Ambos os
+	// caminhos produzem as MESMAS colunas, na mesma ordem, p/ o scan ser compartilhado.
+	var q string
+	var args []any
+	if col := dateColumn(f.DateField); col != "" && (f.From != "" || f.To != "") {
+		q, args = empresasFilteredQuery(f, col)
+	} else {
+		q, args = empresasCounterQuery(f)
+	}
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []model.EmpresaAgg{}
+	total := 0
+	for rows.Next() {
+		var a model.EmpresaAgg
+		var c model.StatusCounts
+		if err := rows.Scan(&a.CodigoEmpresa, &a.CodigoFilial, &a.NomeEmpresa,
+			&c.Arrived, &c.Synced, &c.Imported, &c.ImportIgnored, &c.PendingImport, &c.Stuck, &c.Lost,
+			&total); err != nil {
+			return nil, 0, err
+		}
+		a.StatusCounts = c
+		a.InTransit = c.Arrived + c.Synced
+		out = append(out, a)
+	}
+	return out, total, rows.Err()
+}
+
+// empresasCounterQuery lê do contador mantido empresa_counts (migração 00011) —
+// instantâneo, sem o GROUP BY codigo_empresa sobre as 14M da notas (era ~30s, só
+// cacheado). As chaves usam sentinela -1 p/ NULL (empresa/filial); o read traduz com
+// NULLIF(coluna,-1). pendentes = itens não-terminais (espelha pendentes() do store em
+// memória); como FILTER sobre sum() pode dar NULL, COALESCE p/ 0.
+func empresasCounterQuery(f EmpresaFilter) (string, []any) {
 	const pend = "COALESCE(sum(n) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck')),0)"
 	having := ""
 	if f.PendentesOnly {
@@ -572,7 +605,7 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 	}
 	// count(*) OVER () é avaliado após GROUP BY/HAVING e antes do LIMIT, então dá
 	// o total de empresas que casam o filtro (para paginação).
-	q := fmt.Sprintf(`
+	return fmt.Sprintf(`
 		SELECT NULLIF(codigo_empresa,-1),
 		  NULLIF(codigo_filial,-1) AS fil,
 		  COALESCE(max(nome), ''),
@@ -589,27 +622,67 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 		GROUP BY codigo_empresa, codigo_filial
 		%s
 		ORDER BY %s
-		%s`, where, having, order, limit)
-	rows, err := p.pool.Query(ctx, q, args...)
-	if err != nil {
-		return nil, 0, err
+		%s`, where, having, order, limit), args
+}
+
+// empresasFilteredQuery agrega por empresa direto da notas, restringindo a janela
+// `col` (date_field) BETWEEN from/to. O contador empresa_counts não tem dimensão
+// temporal, então a janela obriga o caminho ao vivo; o filtro de data usa o índice
+// da coluna (ex.: idx_notas_imported) e corta o conjunto, então o GROUP BY roda sobre
+// uma fração das 14M. Mesma semântica de data do GET /notas (>= from::date, <= to::date).
+func empresasFilteredQuery(f EmpresaFilter, col string) (string, []any) {
+	const pend = "count(*) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck'))"
+	having := ""
+	if f.PendentesOnly {
+		having = "HAVING " + pend + " > 0"
 	}
-	defer rows.Close()
-	out := []model.EmpresaAgg{}
-	total := 0
-	for rows.Next() {
-		var a model.EmpresaAgg
-		var c model.StatusCounts
-		if err := rows.Scan(&a.CodigoEmpresa, &a.CodigoFilial, &a.NomeEmpresa,
-			&c.Arrived, &c.Synced, &c.Imported, &c.ImportIgnored, &c.PendingImport, &c.Stuck, &c.Lost,
-			&total); err != nil {
-			return nil, 0, err
-		}
-		a.StatusCounts = c
-		a.InTransit = c.Arrived + c.Synced
-		out = append(out, a)
+	order := "codigo_empresa NULLS LAST, fil NULLS LAST"
+	if f.Sort == "pendentes" {
+		order = pend + " DESC, " + order
 	}
-	return out, total, rows.Err()
+	where := []string{}
+	args := []any{}
+	add := func(cond string, val any) {
+		args = append(args, val)
+		where = append(where, fmt.Sprintf(cond, len(args)))
+	}
+	if f.Query != "" {
+		add("empresa_nome ILIKE $%d", "%"+f.Query+"%")
+	}
+	if f.From != "" {
+		add(col+" >= $%d::date", f.From)
+	}
+	if f.To != "" {
+		add(col+" <= $%d::date", f.To)
+	}
+	clause := ""
+	if len(where) > 0 {
+		clause = "WHERE " + strings.Join(where, " AND ")
+	}
+	limit := ""
+	if f.Limit > 0 {
+		args = append(args, f.Limit, f.Offset)
+		limit = fmt.Sprintf("LIMIT $%d OFFSET $%d", len(args)-1, len(args))
+	}
+	// Notas sem empresa colapsam numa única linha "Sem empresa": fil forçada a NULL.
+	return fmt.Sprintf(`
+		SELECT codigo_empresa,
+		  CASE WHEN codigo_empresa IS NULL THEN NULL ELSE codigo_filial END AS fil,
+		  COALESCE(max(empresa_nome), ''),
+		  count(*) FILTER (WHERE status='arrived'),
+		  count(*) FILTER (WHERE status='synced'),
+		  count(*) FILTER (WHERE status='imported'),
+		  count(*) FILTER (WHERE status='import_ignored'),
+		  count(*) FILTER (WHERE status='pending_import'),
+		  count(*) FILTER (WHERE status='stuck'),
+		  count(*) FILTER (WHERE status='lost'),
+		  count(*) OVER ()
+		FROM notas
+		%s
+		GROUP BY codigo_empresa, fil
+		%s
+		ORDER BY %s
+		%s`, clause, having, order, limit), args
 }
 
 func (p *Postgres) ListNfseImport(ctx context.Context, f NfseFilter) ([]model.NfseImport, int, error) {

@@ -68,8 +68,15 @@ type EmpresaFilter struct {
 	PendentesOnly bool   // só empresas com itens não-terminais (arrived/synced/pending_import/stuck)
 	Query         string // busca por nome da empresa (ILIKE); vazio = todas
 	Sort          string // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
-	Limit         int    // <=0 retorna todas (sem paginação)
-	Offset        int
+	// faixa de data sobre o campo escolhido (mesmos nomes do GET /notas):
+	// emissao|arrived|synced|imported. Quando preenchida, os agregados são
+	// recomputados ao vivo da notas (o contador empresa_counts não tem dimensão
+	// temporal); sem faixa, lê do contador (instantâneo).
+	DateField string
+	From      string // yyyy-mm-dd (inclusive)
+	To        string // yyyy-mm-dd (inclusive)
+	Limit     int    // <=0 retorna todas (sem paginação)
+	Offset    int
 }
 
 // TimeseriesFilter holds the timeseries query params (já validados no handler).

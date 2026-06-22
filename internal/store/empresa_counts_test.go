@@ -122,6 +122,70 @@ func TestEmpresaCounts(t *testing.T) {
 	}
 }
 
+// TestEmpresasDateFilter valida o caminho ao vivo (janela date_field from/to) do
+// Empresas: só notas cujo campo escolhido cai no período entram nos agregados.
+func TestEmpresasDateFilter(t *testing.T) {
+	dsn := os.Getenv("TRACKER_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("set TRACKER_TEST_PG_DSN")
+	}
+	ctx := context.Background()
+	applyAllMigrations(t, ctx, dsn)
+	pg, err := NewPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pg.Close()
+
+	emp := 1203
+	mkImported := func(chave string, day int) []model.Observation {
+		at := time.Date(2026, 6, day, 10, 0, 0, 0, time.UTC)
+		return []model.Observation{
+			{ChaveAcesso: chave, Stage: model.StageArrival, EventType: model.EventFileSeen,
+				ObservedAt: at, DocType: model.DocNFe, Source: "agent:test", CodigoEmpresa: &emp, NomeEmpresa: "ACME LTDA"},
+			{ChaveAcesso: chave, Stage: model.StageImport, EventType: model.EventImported,
+				ObservedAt: at, DocType: model.DocNFe, Source: "poller:firebird", CodigoEmpresa: &emp, NomeEmpresa: "ACME LTDA"},
+		}
+	}
+	// 3 notas importadas em dias diferentes: 05, 15, 25 de junho.
+	for _, c := range []struct {
+		chave string
+		day   int
+	}{
+		{"35250712345678000190550010000001231000000005", 5},
+		{"35250712345678000190550010000001231000000015", 15},
+		{"35250712345678000190550010000001231000000025", 25},
+	} {
+		if _, _, err := pg.AppendObservations(ctx, mkImported(c.chave, c.day)); err != nil {
+			t.Fatalf("append %s: %v", c.chave, err)
+		}
+	}
+
+	// Sem janela (caminho do contador): 3 importadas.
+	all, _, err := pg.Empresas(ctx, EmpresaFilter{})
+	if err != nil || len(all) != 1 || all[0].Imported != 3 {
+		t.Fatalf("sem janela: len=%d imported=%v err=%v (want 1/3)", len(all), all, err)
+	}
+
+	// Janela 10..20 de junho por imported (caminho ao vivo): só a nota do dia 15.
+	win, _, err := pg.Empresas(ctx, EmpresaFilter{DateField: "imported", From: "2026-06-10", To: "2026-06-20"})
+	if err != nil || len(win) != 1 {
+		t.Fatalf("janela: len=%d err=%v", len(win), err)
+	}
+	if win[0].Imported != 1 {
+		t.Errorf("janela 10..20: imported=%d want 1 (só o dia 15)", win[0].Imported)
+	}
+
+	// Janela que não pega nenhuma: vazio.
+	none, _, err := pg.Empresas(ctx, EmpresaFilter{DateField: "imported", From: "2026-07-01", To: "2026-07-31"})
+	if err != nil {
+		t.Fatalf("janela vazia: %v", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("janela jul: len=%d want 0", len(none))
+	}
+}
+
 // reconcile compara, por (empresa,filial,status), a soma em empresa_counts com o
 // count(*) ao vivo na notas. Qualquer divergência indica bug no trigger.
 func reconcile(t *testing.T, ctx context.Context, dsn string) {
