@@ -49,6 +49,12 @@ func Nota(chave string, obs []model.Observation) model.Nota {
 		if o.NomeEmpresa != "" {
 			n.NomeEmpresa = o.NomeEmpresa
 		}
+		// direção acompanha a atribuição de empresa (último não-vazio vence): vem do
+		// poller (compara CNPJ da filial com emitente/destinatário). Obs do agente
+		// (chegada/sync) não a trazem, então não sobrescrevem com vazio.
+		if o.Direction != "" {
+			n.Direction = o.Direction
+		}
 		// metadados imutáveis por nota: primeira observação não-vazia vence
 		setIfEmpty(&n.CnpjEmitente, o.CnpjEmitente)
 		setIfEmpty(&n.NomeEmitente, o.NomeEmitente)

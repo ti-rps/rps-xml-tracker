@@ -359,6 +359,9 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 		if f.DocType != "" && n.DocType != f.DocType {
 			continue
 		}
+		if f.Direction != "" && n.Direction != f.Direction {
+			continue
+		}
 		// Notas sem empresa colapsam numa única linha "Sem empresa" (emp/fil NULL).
 		var k key
 		var a *model.EmpresaAgg
@@ -468,6 +471,9 @@ func agingMatches(n model.Nota, f AgingFilter) bool {
 	if f.DocType != "" && n.DocType != f.DocType {
 		return false
 	}
+	if f.Direction != "" && n.Direction != f.Direction {
+		return false
+	}
 	return true
 }
 
@@ -568,6 +574,9 @@ func matches(n model.Nota, f NotaFilter) bool {
 		return false
 	}
 	if f.Numero != "" && !strings.HasPrefix(n.NumeroNota, f.Numero) {
+		return false
+	}
+	if f.Direction != "" && n.Direction != f.Direction {
 		return false
 	}
 	if !inDateWindow(n, f.DateField, f.From, f.To) {

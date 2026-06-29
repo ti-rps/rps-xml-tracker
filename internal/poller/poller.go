@@ -374,5 +374,8 @@ func importObs(chave, event string, now time.Time, payload map[string]any, st fi
 		NomeDestinatario: toUTF8(st.NomeDestinatario),
 		DataEmissao:      st.DataEmissao,
 		ValorTotal:       st.ValorTotal,
+		// direção = lado da empresa: raiz do CNPJ da filial (Athenas) vs emitente/
+		// destinatário. CNPJ é numérico (sem acento), não precisa transcodificar.
+		Direction: model.DirectionFromCNPJs(st.CnpjFilial, st.CnpjEmitente, st.CnpjDestinatario),
 	}
 }

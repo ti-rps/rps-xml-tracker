@@ -84,6 +84,7 @@ type EmpresaFilter struct {
 	Query         string        // busca por nome da empresa (ILIKE); vazio = todas
 	Sort          string        // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
 	DocType       model.DocType // filtra por tipo de documento; força recompute ao vivo (o contador não tem essa dimensão)
+	Direction     string        // entrada|saida; também força recompute ao vivo
 	// faixa de data sobre o campo escolhido (mesmos nomes do GET /notas):
 	// emissao|arrived|synced|imported. Quando preenchida, os agregados são
 	// recomputados ao vivo da notas (o contador empresa_counts não tem dimensão
@@ -100,6 +101,7 @@ type AgingFilter struct {
 	CodigoEmpresa *int
 	CodigoFilial  *int
 	DocType       model.DocType
+	Direction     string // entrada|saida
 }
 
 // TimeseriesFilter holds the timeseries query params (já validados no handler).
@@ -127,6 +129,7 @@ type NotaFilter struct {
 	Cnpj          string // LIKE em cnpj_emitente OU cnpj_destinatario
 	ChaveQuery    string // partial/full chave
 	Numero        string // prefixo do número da nota (nNF derivado da chave); distinto de ChaveQuery
+	Direction     string // entrada|saida (lado da empresa)
 	// faixa de data sobre o campo escolhido: emissao|arrived|synced|imported
 	DateField string
 	From      string // yyyy-mm-dd (inclusive)

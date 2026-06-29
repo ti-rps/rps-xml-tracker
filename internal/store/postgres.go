@@ -156,6 +156,9 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 		// índice em vez de varrer as 21M. Curinga só à direita (prefixo), não no meio.
 		add(numeroExpr+" LIKE $%d", f.Numero+"%")
 	}
+	if f.Direction != "" {
+		add("direction = $%d", f.Direction)
+	}
 	if col := dateColumn(f.DateField); col != "" {
 		if f.From != "" {
 			add(col+" >= $%d::date", f.From)
@@ -647,6 +650,9 @@ func (p *Postgres) agingBuckets(ctx context.Context, f AgingFilter, statusCond, 
 	if f.DocType != "" {
 		add("doc_type = $%d::doc_type", string(f.DocType))
 	}
+	if f.Direction != "" {
+		add("direction = $%d", f.Direction)
+	}
 	q := fmt.Sprintf(`
 		SELECT CASE
 		         WHEN age < interval '1 day'   THEN '<1d'
@@ -674,6 +680,60 @@ func (p *Postgres) agingBuckets(ctx context.Context, f AgingFilter, statusCond, 
 	return counts, rows.Err()
 }
 
+// FilialCNPJ associa (codigo_empresa, codigo_filial) ao CNPJ da filial (vindo do
+// Athenas/TABFILIAL), para o backfill retroativo da direção.
+type FilialCNPJ struct {
+	CodigoEmpresa int
+	CodigoFilial  int
+	Cnpj          string
+}
+
+// BackfillDirection preenche notas.direction (onde ainda é NULL) a partir do mapa de
+// CNPJ por filial: compara a raiz-8 do CNPJ da filial com a do emitente/destinatário
+// já gravados na nota — 'saida' se casa o emitente, 'entrada' se casa o destinatário
+// (mesma precedência de model.DirectionFromCNPJs). One-off, idempotente (só toca
+// direction IS NULL) e não dispara os triggers de contador (não mexe em status/empresa).
+// O root8 é computado em SQL nos dois lados (uma única fonte da verdade). Retorna
+// quantas notas foram classificadas.
+func (p *Postgres) BackfillDirection(ctx context.Context, filiais []FilialCNPJ) (int64, error) {
+	emp := make([]int32, len(filiais))
+	fil := make([]int32, len(filiais))
+	cnpj := make([]string, len(filiais))
+	for i, f := range filiais {
+		emp[i], fil[i], cnpj[i] = int32(f.CodigoEmpresa), int32(f.CodigoFilial), f.Cnpj
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx,
+		`CREATE TEMP TABLE _fil (codigo_empresa int, codigo_filial int, root8 text) ON COMMIT DROP`); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO _fil SELECT e, f, left(regexp_replace(c, '[^0-9]', '', 'g'), 8)
+		   FROM unnest($1::int[], $2::int[], $3::text[]) AS t(e, f, c)`, emp, fil, cnpj); err != nil {
+		return 0, err
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE notas n SET direction = CASE
+		    WHEN left(regexp_replace(coalesce(n.cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = x.root8 THEN 'saida'
+		    ELSE 'entrada' END
+		FROM _fil x
+		WHERE n.codigo_empresa = x.codigo_empresa AND n.codigo_filial = x.codigo_filial
+		  AND n.direction IS NULL AND length(x.root8) = 8
+		  AND ( left(regexp_replace(coalesce(n.cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = x.root8
+		     OR left(regexp_replace(coalesce(n.cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = x.root8 )`)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // orderedAging monta as faixas do aging na ordem canônica (incluindo vazias=0), com
 // MaxDays no limite superior (nil na faixa aberta ">30d").
 func orderedAging(counts map[string]int) []model.AgingBucket {
@@ -699,7 +759,7 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 	// contador empresa_counts não tem nenhuma dessas dimensões. Sem nenhum dos dois,
 	// lê do contador (instantâneo).
 	hasWindow := dateColumn(f.DateField) != "" && (f.From != "" || f.To != "")
-	if hasWindow || f.DocType != "" {
+	if hasWindow || f.DocType != "" || f.Direction != "" {
 		q, args = empresasFilteredQuery(f)
 	} else {
 		q, args = empresasCounterQuery(f)
@@ -804,6 +864,9 @@ func empresasFilteredQuery(f EmpresaFilter) (string, []any) {
 	}
 	if f.DocType != "" {
 		add("doc_type = $%d::doc_type", string(f.DocType))
+	}
+	if f.Direction != "" {
+		add("direction = $%d", f.Direction)
 	}
 	if col := dateColumn(f.DateField); col != "" {
 		if f.From != "" {
@@ -932,19 +995,22 @@ const notaSelect = `
 	       arrived_at, synced_at, pending_at, imported_at, import_ignored, motivo_ignorado,
 	       first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
 	       cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
-	       empresa_nome
+	       empresa_nome, direction
 	FROM notas`
 
 func scanNota(r rowScanner) (model.Nota, error) {
 	var n model.Nota
-	var motivo, cnpjE, nomeE, cnpjD, nomeD, empNome *string
+	var motivo, cnpjE, nomeE, cnpjD, nomeD, empNome, dir *string
 	var emissao *time.Time
 	err := r.Scan(&n.ChaveAcesso, &n.DocType, &n.Status, &n.CodigoEmpresa, &n.CodigoFilial,
 		&n.ArrivedAt, &n.SyncedAt, &n.PendingAt, &n.ImportedAt, &n.ImportIgnored, &motivo,
 		&n.FirstSeenAt, &n.LastUpdateAt, &n.LatArrivalSyncS, &n.LatSyncImportS,
-		&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &n.ValorTotal, &empNome)
+		&cnpjE, &nomeE, &cnpjD, &nomeD, &emissao, &n.ValorTotal, &empNome, &dir)
 	if empNome != nil {
 		n.NomeEmpresa = *empNome
+	}
+	if dir != nil {
+		n.Direction = *dir
 	}
 	if motivo != nil {
 		n.MotivoIgnorado = *motivo
@@ -975,9 +1041,9 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		   arrived_at, synced_at, imported_at, import_ignored, motivo_ignorado,
 		   first_seen_at, last_update_at, lat_arrival_sync_s, lat_sync_import_s,
 		   cnpj_emitente, emitente_nome, cnpj_destinatario, destinatario_nome, data_emissao, valor_total,
-		   empresa_nome, pending_at)
+		   empresa_nome, pending_at, direction)
 		VALUES ($1,$2::doc_type,$3::nota_status,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
-		        $15,$16,$17,$18,$19::date,$20,$21,$22)
+		        $15,$16,$17,$18,$19::date,$20,$21,$22,$23)
 		ON CONFLICT (chave_acesso) DO UPDATE SET
 		  pending_at=EXCLUDED.pending_at,
 		  doc_type=EXCLUDED.doc_type, status=EXCLUDED.status,
@@ -993,13 +1059,14 @@ func upsertNota(ctx context.Context, tx pgx.Tx, n model.Nota) error {
 		  destinatario_nome=COALESCE(EXCLUDED.destinatario_nome, notas.destinatario_nome),
 		  data_emissao=COALESCE(EXCLUDED.data_emissao, notas.data_emissao),
 		  valor_total=COALESCE(EXCLUDED.valor_total, notas.valor_total),
-		  empresa_nome=COALESCE(EXCLUDED.empresa_nome, notas.empresa_nome)`,
+		  empresa_nome=COALESCE(EXCLUDED.empresa_nome, notas.empresa_nome),
+		  direction=COALESCE(EXCLUDED.direction, notas.direction)`,
 		n.ChaveAcesso, docTypeOrDefault(n.DocType), string(n.Status), n.CodigoEmpresa, n.CodigoFilial,
 		n.ArrivedAt, n.SyncedAt, n.ImportedAt, n.ImportIgnored, nullStr(n.MotivoIgnorado),
 		n.FirstSeenAt, n.LastUpdateAt, n.LatArrivalSyncS, n.LatSyncImportS,
 		nullStr(n.CnpjEmitente), nullStr(n.NomeEmitente), nullStr(n.CnpjDestinatario),
 		nullStr(n.NomeDestinatario), nullStr(n.DataEmissao), n.ValorTotal, nullStr(n.NomeEmpresa),
-		n.PendingAt)
+		n.PendingAt, nullStr(n.Direction))
 	return err
 }
 
