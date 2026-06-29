@@ -356,6 +356,9 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 		if !inDateWindow(n, f.DateField, f.From, f.To) {
 			continue
 		}
+		if f.DocType != "" && n.DocType != f.DocType {
+			continue
+		}
 		// Notas sem empresa colapsam numa única linha "Sem empresa" (emp/fil NULL).
 		var k key
 		var a *model.EmpresaAgg
@@ -418,6 +421,54 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 		out = out[:f.Limit]
 	}
 	return out, total, nil
+}
+
+func (m *Memory) Aging(_ context.Context, f AgingFilter) (model.Aging, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now()
+	toSync, toImport := map[string]int{}, map[string]int{}
+	for _, n := range m.allNotas() {
+		if !agingMatches(n, f) {
+			continue
+		}
+		switch n.Status {
+		case model.StatusArrived:
+			ref := n.ArrivedAt
+			if ref == nil {
+				ref = &n.FirstSeenAt
+			}
+			toSync[model.AgingBucketOf(now.Sub(*ref))]++
+		case model.StatusSynced, model.StatusPendingImport:
+			ref := n.SyncedAt
+			if ref == nil {
+				ref = n.PendingAt
+			}
+			if ref == nil {
+				ref = &n.FirstSeenAt
+			}
+			toImport[model.AgingBucketOf(now.Sub(*ref))]++
+		}
+	}
+	return model.Aging{
+		AnchorToSync:   "arrived_at",
+		AnchorToImport: "synced_at",
+		ToSync:         orderedAging(toSync),
+		ToImport:       orderedAging(toImport),
+	}, nil
+}
+
+func agingMatches(n model.Nota, f AgingFilter) bool {
+	if f.CodigoEmpresa != nil && (n.CodigoEmpresa == nil || *n.CodigoEmpresa != *f.CodigoEmpresa) {
+		return false
+	}
+	if f.CodigoFilial != nil && (n.CodigoFilial == nil || *n.CodigoFilial != *f.CodigoFilial) {
+		return false
+	}
+	if f.DocType != "" && n.DocType != f.DocType {
+		return false
+	}
+	return true
 }
 
 // ListNfseImport: a impl em memória não tem dados NFSe (vem do Firebird, só no Postgres).
@@ -514,6 +565,9 @@ func matches(n model.Nota, f NotaFilter) bool {
 		return false
 	}
 	if f.ChaveQuery != "" && !strings.Contains(n.ChaveAcesso, f.ChaveQuery) {
+		return false
+	}
+	if f.Numero != "" && !strings.HasPrefix(n.NumeroNota, f.Numero) {
 		return false
 	}
 	if !inDateWindow(n, f.DateField, f.From, f.To) {

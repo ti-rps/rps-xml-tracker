@@ -204,6 +204,50 @@ func BacklogBucketOf(age time.Duration) string {
 	}
 }
 
+// AgingBucket é uma faixa de idade do backlog pendente. MaxDays é o limite superior
+// (exclusivo) da faixa em dias; nil na faixa aberta (">30d").
+type AgingBucket struct {
+	Label   string `json:"label"`
+	MaxDays *int   `json:"max_days,omitempty"`
+	Count   int    `json:"count"`
+}
+
+// Aging é o backlog pendente por faixa de idade, separado pelas duas esperas:
+// to_sync (status arrived; idade desde arrived_at) e to_import (status synced/
+// pending_import; idade desde synced_at). Os anchors são ecoados p/ o front rotular.
+type Aging struct {
+	AnchorToSync   string        `json:"anchor_to_sync"`   // "arrived_at"
+	AnchorToImport string        `json:"anchor_to_import"` // "synced_at"
+	ToSync         []AgingBucket `json:"to_sync"`
+	ToImport       []AgingBucket `json:"to_import"`
+}
+
+// AgingBuckets é a ordem canônica das faixas do aging (com o limite superior em dias;
+// 0 = faixa aberta ">30d"). Compartilhado por Postgres e memória.
+var AgingBuckets = []struct {
+	Label   string
+	MaxDays int // 0 = aberta (>30d)
+}{
+	{"<1d", 1}, {"1-3d", 3}, {"3-7d", 7}, {"7-30d", 30}, {">30d", 0},
+}
+
+// AgingBucketOf mapeia uma idade para o label da faixa do aging.
+func AgingBucketOf(age time.Duration) string {
+	days := age.Hours() / 24
+	switch {
+	case days < 1:
+		return "<1d"
+	case days < 3:
+		return "1-3d"
+	case days < 7:
+		return "3-7d"
+	case days < 30:
+		return "7-30d"
+	default:
+		return ">30d"
+	}
+}
+
 // EmpresaAgg is the per-empresa status breakdown (quem está pendente).
 type EmpresaAgg struct {
 	CodigoEmpresa *int   `json:"codigo_empresa,omitempty"`

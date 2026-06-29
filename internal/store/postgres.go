@@ -150,6 +150,12 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 			add("chave_acesso LIKE $%d", "%"+f.ChaveQuery+"%")
 		}
 	}
+	if f.Numero != "" {
+		// Match por PREFIXO do número da nota (nNF). A expressão é idêntica à do índice
+		// idx_notas_numero (migração 00012, text_pattern_ops) -> LIKE 'prefixo%' usa o
+		// índice em vez de varrer as 21M. Curinga só à direita (prefixo), não no meio.
+		add(numeroExpr+" LIKE $%d", f.Numero+"%")
+	}
 	if col := dateColumn(f.DateField); col != "" {
 		if f.From != "" {
 			add(col+" >= $%d::date", f.From)
@@ -596,14 +602,105 @@ func orderedBacklog(counts map[string]int) []model.BacklogBucket {
 	return out
 }
 
+// Aging separa o backlog pendente em duas esperas, cada uma datada pelo evento que
+// iniciou a espera atual: to_sync (status arrived, idade desde arrived_at) e to_import
+// (status synced/pending_import, idade desde synced_at). COALESCE com pending_at/
+// first_seen_at cobre notas vistas só pelo poller (sem arrived/synced gravado).
+func (p *Postgres) Aging(ctx context.Context, f AgingFilter) (model.Aging, error) {
+	out := model.Aging{
+		AnchorToSync:   "arrived_at",
+		AnchorToImport: "synced_at",
+		ToSync:         orderedAging(nil),
+		ToImport:       orderedAging(nil),
+	}
+	toSync, err := p.agingBuckets(ctx, f,
+		"status = 'arrived'::nota_status",
+		"now() - COALESCE(arrived_at, first_seen_at)")
+	if err != nil {
+		return out, err
+	}
+	toImport, err := p.agingBuckets(ctx, f,
+		"status IN ('synced','pending_import')",
+		"now() - COALESCE(synced_at, pending_at, first_seen_at)")
+	if err != nil {
+		return out, err
+	}
+	out.ToSync, out.ToImport = orderedAging(toSync), orderedAging(toImport)
+	return out, nil
+}
+
+// agingBuckets conta as notas que casam statusCond + filtros, agrupadas pela faixa de
+// idade de ageExpr (ambos interpolados de literais internos — nunca de input).
+func (p *Postgres) agingBuckets(ctx context.Context, f AgingFilter, statusCond, ageExpr string) (map[string]int, error) {
+	where := []string{statusCond}
+	args := []any{}
+	add := func(cond string, val any) {
+		args = append(args, val)
+		where = append(where, fmt.Sprintf(cond, len(args)))
+	}
+	if f.CodigoEmpresa != nil {
+		add("codigo_empresa = $%d", *f.CodigoEmpresa)
+	}
+	if f.CodigoFilial != nil {
+		add("codigo_filial = $%d", *f.CodigoFilial)
+	}
+	if f.DocType != "" {
+		add("doc_type = $%d::doc_type", string(f.DocType))
+	}
+	q := fmt.Sprintf(`
+		SELECT CASE
+		         WHEN age < interval '1 day'   THEN '<1d'
+		         WHEN age < interval '3 days'  THEN '1-3d'
+		         WHEN age < interval '7 days'  THEN '3-7d'
+		         WHEN age < interval '30 days' THEN '7-30d'
+		         ELSE '>30d'
+		       END AS label, count(*)
+		FROM (SELECT %s AS age FROM notas WHERE %s) s
+		GROUP BY 1`, ageExpr, strings.Join(where, " AND "))
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var label string
+		var n int
+		if err := rows.Scan(&label, &n); err != nil {
+			return nil, err
+		}
+		counts[label] = n
+	}
+	return counts, rows.Err()
+}
+
+// orderedAging monta as faixas do aging na ordem canônica (incluindo vazias=0), com
+// MaxDays no limite superior (nil na faixa aberta ">30d").
+func orderedAging(counts map[string]int) []model.AgingBucket {
+	out := make([]model.AgingBucket, 0, len(model.AgingBuckets))
+	for _, b := range model.AgingBuckets {
+		ab := model.AgingBucket{Label: b.Label, Count: counts[b.Label]}
+		if b.MaxDays > 0 {
+			md := b.MaxDays
+			ab.MaxDays = &md
+		}
+		out = append(out, ab)
+	}
+	return out
+}
+
 func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
 	// Sem janela de data -> lê do contador (instantâneo). Com date_field+from/to ->
 	// recomputa ao vivo da notas (o contador não tem dimensão temporal). Ambos os
 	// caminhos produzem as MESMAS colunas, na mesma ordem, p/ o scan ser compartilhado.
 	var q string
 	var args []any
-	if col := dateColumn(f.DateField); col != "" && (f.From != "" || f.To != "") {
-		q, args = empresasFilteredQuery(f, col)
+	// Recompute ao vivo da notas quando há janela de data OU filtro de doc_type — o
+	// contador empresa_counts não tem nenhuma dessas dimensões. Sem nenhum dos dois,
+	// lê do contador (instantâneo).
+	hasWindow := dateColumn(f.DateField) != "" && (f.From != "" || f.To != "")
+	if hasWindow || f.DocType != "" {
+		q, args = empresasFilteredQuery(f)
 	} else {
 		q, args = empresasCounterQuery(f)
 	}
@@ -680,12 +777,13 @@ func empresasCounterQuery(f EmpresaFilter) (string, []any) {
 		%s`, where, having, order, limit), args
 }
 
-// empresasFilteredQuery agrega por empresa direto da notas, restringindo a janela
-// `col` (date_field) BETWEEN from/to. O contador empresa_counts não tem dimensão
-// temporal, então a janela obriga o caminho ao vivo; o filtro de data usa o índice
-// da coluna (ex.: idx_notas_imported) e corta o conjunto, então o GROUP BY roda sobre
-// uma fração das 14M. Mesma semântica de data do GET /notas (>= from::date, <= to::date).
-func empresasFilteredQuery(f EmpresaFilter, col string) (string, []any) {
+// empresasFilteredQuery agrega por empresa direto da notas, restringindo por janela
+// de data (date_field BETWEEN from/to) e/ou doc_type. O contador empresa_counts não
+// tem dimensão temporal nem de tipo, então qualquer um desses obriga o caminho ao vivo;
+// o filtro de data usa o índice da coluna (ex.: idx_notas_imported) e corta o conjunto,
+// então o GROUP BY roda sobre uma fração das 14M. Mesma semântica de data do GET /notas
+// (>= from::date, <= to::date).
+func empresasFilteredQuery(f EmpresaFilter) (string, []any) {
 	const pend = "count(*) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck'))"
 	having := ""
 	if f.PendentesOnly {
@@ -704,11 +802,16 @@ func empresasFilteredQuery(f EmpresaFilter, col string) (string, []any) {
 	if f.Query != "" {
 		add("empresa_nome ILIKE $%d", "%"+f.Query+"%")
 	}
-	if f.From != "" {
-		add(col+" >= $%d::date", f.From)
+	if f.DocType != "" {
+		add("doc_type = $%d::doc_type", string(f.DocType))
 	}
-	if f.To != "" {
-		add(col+" <= $%d::date", f.To)
+	if col := dateColumn(f.DateField); col != "" {
+		if f.From != "" {
+			add(col+" >= $%d::date", f.From)
+		}
+		if f.To != "" {
+			add(col+" <= $%d::date", f.To)
+		}
 	}
 	clause := ""
 	if len(where) > 0 {
@@ -818,6 +921,11 @@ func f2i(f *float64) *int64 {
 
 // rowScanner unifies pgx.Row and pgx.Rows for scanNota.
 type rowScanner interface{ Scan(dest ...any) error }
+
+// numeroExpr extrai o número da nota (nNF) da chave: 9 dígitos nas posições 26–34,
+// sem zeros à esquerda (espelha model.NumeroNota). DEVE ser idêntica à expressão do
+// índice idx_notas_numero (migração 00012) p/ o planner usar o índice no LIKE de prefixo.
+const numeroExpr = `ltrim(substring(chave_acesso from 26 for 9), '0')`
 
 const notaSelect = `
 	SELECT chave_acesso, doc_type, status, codigo_empresa, codigo_filial,

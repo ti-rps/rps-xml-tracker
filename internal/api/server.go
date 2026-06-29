@@ -86,6 +86,7 @@ func (s *Server) routes() {
 	read.GET("/metrics/timeseries", s.handleTimeseries)
 	read.GET("/metrics/doctypes", s.handleDocTypes)
 	read.GET("/metrics/backlog-age", s.handleBacklogAge)
+	read.GET("/metrics/aging", s.handleAging)
 	read.GET("/empresas", s.handleEmpresas)
 	read.GET("/nfse/import", s.handleNfseImport)
 	read.GET("/status", s.handleStatus)
@@ -158,6 +159,26 @@ func (s *Server) handleDocTypes(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
+func (s *Server) handleAging(c *gin.Context) {
+	f := store.AgingFilter{DocType: model.DocType(c.Query("doc_type"))}
+	if v := c.Query("codigo_empresa"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.CodigoEmpresa = &n
+		}
+	}
+	if v := c.Query("codigo_filial"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.CodigoFilial = &n
+		}
+	}
+	ag, err := s.st.Aging(c.Request.Context(), f)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular aging"})
+		return
+	}
+	c.JSON(http.StatusOK, ag)
+}
+
 func (s *Server) handleBacklogAge(c *gin.Context) {
 	items, err := s.st.BacklogAge(c.Request.Context())
 	if err != nil {
@@ -172,10 +193,11 @@ func (s *Server) handleEmpresas(c *gin.Context) {
 		PendentesOnly: c.Query("pendentes") == "true",
 		Query:         c.Query("q"),
 		Sort:          c.Query("sort"),
-		DateField:     c.Query("date_field"),            // emissao|arrived|synced|imported
-		From:          c.Query("from"),                  // yyyy-mm-dd (inclusive)
-		To:            c.Query("to"),                    // yyyy-mm-dd (inclusive)
-		Limit:         atoiDefault(c.Query("limit"), 0), // 0 = todas (sem paginação)
+		DocType:       model.DocType(c.Query("doc_type")), // NFE|NFCE|CTE|NFS|EVENTO|UNKNOWN
+		DateField:     c.Query("date_field"),              // emissao|arrived|synced|imported
+		From:          c.Query("from"),                    // yyyy-mm-dd (inclusive)
+		To:            c.Query("to"),                      // yyyy-mm-dd (inclusive)
+		Limit:         atoiDefault(c.Query("limit"), 0),   // 0 = todas (sem paginação)
 		Offset:        atoiDefault(c.Query("offset"), 0),
 	}
 	items, total, err := s.st.Empresas(c.Request.Context(), f)
@@ -250,6 +272,7 @@ func (s *Server) handleListNotas(c *gin.Context) {
 		EmpresaQuery: c.Query("empresa"),
 		Cnpj:         c.Query("cnpj"),
 		ChaveQuery:   c.Query("q"),
+		Numero:       onlyDigits(c.Query("numero")),
 		DateField:    c.Query("date_field"),
 		From:         c.Query("from"),
 		To:           c.Query("to"),
@@ -275,6 +298,19 @@ func (s *Server) handleListNotas(c *gin.Context) {
 		items = []model.Nota{}
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "limit": f.Limit, "offset": f.Offset})
+}
+
+// onlyDigits mantém apenas os dígitos de s (o número da nota é numérico). Descarta
+// curingas de LIKE (%, _) e espaços, garantindo que o param `numero` case o índice
+// de prefixo sem injeção de wildcard.
+func onlyDigits(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func atoiDefault(s string, def int) int {
