@@ -16,7 +16,7 @@ type countingStore struct {
 	calls int32
 }
 
-func (c *countingStore) Overview(context.Context) (model.Overview, error) {
+func (c *countingStore) Overview(context.Context, OverviewFilter) (model.Overview, error) {
 	atomic.AddInt32(&c.calls, 1)
 	time.Sleep(10 * time.Millisecond) // simula query lenta
 	return model.Overview{StatusCounts: model.StatusCounts{Arrived: 7}}, nil
@@ -32,7 +32,7 @@ func TestCached_SingleFlightAndTTL(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ov, err := c.Overview(context.Background())
+			ov, err := c.Overview(context.Background(), OverviewFilter{})
 			if err != nil || ov.Arrived != 7 {
 				t.Errorf("overview inesperado: %+v err=%v", ov, err)
 			}
@@ -44,7 +44,7 @@ func TestCached_SingleFlightAndTTL(t *testing.T) {
 	}
 
 	// Dentro do TTL: serve do cache, sem nova chamada.
-	if _, err := c.Overview(context.Background()); err != nil {
+	if _, err := c.Overview(context.Background(), OverviewFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	if n := atomic.LoadInt32(&base.calls); n != 1 {
@@ -54,7 +54,7 @@ func TestCached_SingleFlightAndTTL(t *testing.T) {
 	// Após o TTL: o get devolve o valor velho NA HORA (não bloqueia) e dispara um
 	// refresh em background, que recomputa de forma assíncrona.
 	time.Sleep(250 * time.Millisecond)
-	if _, err := c.Overview(context.Background()); err != nil {
+	if _, err := c.Overview(context.Background(), OverviewFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -110,7 +110,7 @@ func TestCached_Warm(t *testing.T) {
 	c := NewCached(base, time.Minute)
 	c.Warm(context.Background())
 	before := atomic.LoadInt32(&base.calls)
-	if _, err := c.Overview(context.Background()); err != nil {
+	if _, err := c.Overview(context.Background(), OverviewFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := atomic.LoadInt32(&base.calls); got != before {

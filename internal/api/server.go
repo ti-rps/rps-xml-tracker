@@ -93,7 +93,23 @@ func (s *Server) routes() {
 }
 
 func (s *Server) handleOverview(c *gin.Context) {
-	ov, err := s.st.Overview(c.Request.Context())
+	f := store.OverviewFilter{
+		DateField: c.Query("date_field"), // emissao|arrived|synced|imported
+		From:      c.Query("from"),        // yyyy-mm-dd (inclusive)
+		To:        c.Query("to"),          // yyyy-mm-dd (inclusive)
+		DocType:   model.DocType(c.Query("doc_type")),
+	}
+	if v := c.Query("codigo_empresa"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.CodigoEmpresa = &n
+		}
+	}
+	if v := c.Query("codigo_filial"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.CodigoFilial = &n
+		}
+	}
+	ov, err := s.st.Overview(c.Request.Context(), f)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular overview"})
 		return

@@ -46,8 +46,10 @@ type Store interface {
 	// DESTRUTIVO: usado só na correção retroativa do fuso do imported_at.
 	UpdateImportedObservedAt(ctx context.Context, chave string, observedAt time.Time) (bool, error)
 
-	// Overview returns the dashboard summary cards.
-	Overview(ctx context.Context) (model.Overview, error)
+	// Overview returns the dashboard summary cards. Com OverviewFilter vazio = estoque
+	// atual global (snapshot). Com janela de data e/ou filtros = recompute ao vivo das
+	// contagens por status (mode="flow"); imported_today e latências seguem globais/30d.
+	Overview(ctx context.Context, f OverviewFilter) (model.Overview, error)
 
 	// Timeseries returns time-bucketed pipeline flow + latency percentiles for the
 	// Painel v2 charts (série contínua, zero-fill nas contagens, nil nas latências).
@@ -102,6 +104,29 @@ type AgingFilter struct {
 	CodigoFilial  *int
 	DocType       model.DocType
 	Direction     string // entrada|saida
+}
+
+// OverviewFilter restringe o overview (GET /metrics/overview). Tudo opcional; vazio =
+// snapshot global. Com janela (date_field+from/to) e/ou empresa/filial/doc_type, as
+// contagens por status são recomputadas ao vivo dentro do recorte.
+type OverviewFilter struct {
+	DateField     string // emissao|arrived|synced|imported
+	From          string // yyyy-mm-dd (inclusive)
+	To            string // yyyy-mm-dd (inclusive)
+	CodigoEmpresa *int
+	CodigoFilial  *int
+	DocType       model.DocType
+}
+
+// windowed reporta se há uma janela de data válida (date_field reconhecido + from/to).
+func (f OverviewFilter) windowed() bool {
+	return dateColumn(f.DateField) != "" && (f.From != "" || f.To != "")
+}
+
+// live reporta se o overview precisa recomputar ao vivo (janela e/ou filtros) em vez de
+// ler o contador notas_counts (snapshot global).
+func (f OverviewFilter) live() bool {
+	return f.windowed() || f.CodigoEmpresa != nil || f.CodigoFilial != nil || f.DocType != ""
 }
 
 // TimeseriesFilter holds the timeseries query params (já validados no handler).

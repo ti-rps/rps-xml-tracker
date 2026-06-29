@@ -42,7 +42,7 @@ func NewCached(s Store, ttl time.Duration) *Cached {
 // recálculos serializados pelo sem, então não afogam o banco. Erros são ignorados
 // (o acesso normal recomputa). Chaves cobrem o que o Painel do maestro consome.
 func (c *Cached) Warm(ctx context.Context) {
-	_, _ = c.Overview(ctx)
+	_, _ = c.Overview(ctx, OverviewFilter{})
 	for _, r := range []int{7, 30, 90} {
 		_, _ = c.Timeseries(ctx, TimeseriesFilter{RangeDays: r, Bucket: "day"})
 	}
@@ -123,14 +123,31 @@ func (c *Cached) computeDetached(compute func(context.Context) (any, error)) (an
 	return compute(cctx)
 }
 
-func (c *Cached) Overview(ctx context.Context) (model.Overview, error) {
-	v, err := c.get("overview", func(cctx context.Context) (any, error) {
-		return c.Store.Overview(cctx)
+func (c *Cached) Overview(ctx context.Context, f OverviewFilter) (model.Overview, error) {
+	// Sem janela/filtros -> chave fixa "overview" (aquecida no Warm). Com recorte, a
+	// chave inclui as dimensões p/ não colidir entre janelas/filtros distintos (mesma
+	// lição da chave do /empresas).
+	key := "overview"
+	if f.live() {
+		key = fmt.Sprintf("overview|%s|%s|%s|%s|%s|%s",
+			f.DateField, f.From, f.To, ptrIntKey(f.CodigoEmpresa), ptrIntKey(f.CodigoFilial), f.DocType)
+	}
+	v, err := c.get(key, func(cctx context.Context) (any, error) {
+		return c.Store.Overview(cctx, f)
 	})
 	if err != nil {
 		return model.Overview{}, err
 	}
 	return v.(model.Overview), nil
+}
+
+// ptrIntKey formata um *int p/ chave de cache: "" se nil, senão o valor (NÃO o
+// ponteiro — %v num *int imprimiria o endereço e quebraria o cache).
+func ptrIntKey(p *int) string {
+	if p == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *p)
 }
 
 type empresasResult struct {

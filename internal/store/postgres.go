@@ -400,11 +400,57 @@ const latencyWindow = "30 days"
 // do maestro). Constante — interpolada direto no SQL sem risco de injeção.
 const tzSaoPaulo = "America/Sao_Paulo"
 
-func (p *Postgres) Overview(ctx context.Context) (model.Overview, error) {
+// overviewWhere monta o WHERE do recompute ao vivo do overview a partir da janela de
+// data (date_field BETWEEN from/to) + filtros de empresa/filial/doc_type. Sempre
+// retorna ao menos "TRUE" para compor com segurança.
+func overviewWhere(f OverviewFilter) (string, []any) {
+	where := []string{}
+	args := []any{}
+	add := func(cond string, val any) {
+		args = append(args, val)
+		where = append(where, fmt.Sprintf(cond, len(args)))
+	}
+	if col := dateColumn(f.DateField); col != "" {
+		if f.From != "" {
+			add(col+" >= $%d::date", f.From)
+		}
+		if f.To != "" {
+			add(col+" <= $%d::date", f.To)
+		}
+	}
+	if f.CodigoEmpresa != nil {
+		add("codigo_empresa = $%d", *f.CodigoEmpresa)
+	}
+	if f.CodigoFilial != nil {
+		add("codigo_filial = $%d", *f.CodigoFilial)
+	}
+	if f.DocType != "" {
+		add("doc_type = $%d::doc_type", string(f.DocType))
+	}
+	if len(where) == 0 {
+		return "TRUE", nil
+	}
+	return strings.Join(where, " AND "), args
+}
+
+func (p *Postgres) Overview(ctx context.Context, f OverviewFilter) (model.Overview, error) {
 	var ov model.Overview
-	// Contagem por status: do contador mantido (notas_counts) — instantâneo, sem
-	// escanear as 14M da notas (migração 00008).
-	rows, err := p.pool.Query(ctx, `SELECT status, sum(n)::bigint FROM notas_counts GROUP BY status`)
+	// Contagem por status. Sem janela/filtros: do contador mantido (notas_counts) —
+	// instantâneo, sem escanear as 14M (migração 00008). Com janela de data e/ou
+	// filtros (empresa/filial/doc_type): recompute ao vivo das notas no recorte
+	// (o contador não tem essas dimensões), agrupando pelo status ATUAL. mode="flow"
+	// sinaliza ao front que é recorte por janela, não estoque global.
+	countSQL := `SELECT status, sum(n)::bigint FROM notas_counts GROUP BY status`
+	var countArgs []any
+	if f.live() {
+		where, args := overviewWhere(f)
+		countSQL = `SELECT status, count(*) FROM notas WHERE ` + where + ` GROUP BY status`
+		countArgs = args
+		if f.windowed() {
+			ov.Mode = "flow"
+		}
+	}
+	rows, err := p.pool.Query(ctx, countSQL, countArgs...)
 	if err != nil {
 		return ov, err
 	}

@@ -177,8 +177,13 @@ type StatusCounts struct {
 // Overview is the dashboard's summary cards.
 type Overview struct {
 	StatusCounts
-	InTransit     int `json:"in_transit"` // arrived + synced
-	ImportedToday int `json:"imported_today"`
+	// Mode = "flow" quando as contagens foram recomputadas dentro de uma janela de data
+	// (notas cujo date_field caiu em [from,to], agrupadas por status atual), em vez do
+	// estoque atual global. Omitido (snapshot) sem janela. ImportedToday e as latências
+	// seguem globais/30d mesmo no modo flow.
+	Mode          string `json:"mode,omitempty"`
+	InTransit     int    `json:"in_transit"` // arrived + synced
+	ImportedToday int    `json:"imported_today"`
 	// latências (segundos); nil quando não há amostra
 	LatArrivalSyncP50S *int64 `json:"lat_arrival_sync_p50_s,omitempty"`
 	LatArrivalSyncP95S *int64 `json:"lat_arrival_sync_p95_s,omitempty"`
