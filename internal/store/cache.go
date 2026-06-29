@@ -144,7 +144,13 @@ func (c *Cached) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empresa
 	if f.Query != "" {
 		return c.Store.Empresas(ctx, f)
 	}
-	key := fmt.Sprintf("empresas|%t|%s|%s|%d|%d", f.PendentesOnly, f.Query, f.Sort, f.Limit, f.Offset)
+	// A chave PRECISA incluir a janela de data (DateField/From/To): sem ela, requisições
+	// com filtros de data diferentes colidem na mesma entrada e servem resultado errado
+	// (ex.: filtro "emissão" recebia o resultado cacheado de "importação"). Os agregados
+	// filtrados por data são justamente o GROUP BY pesado sobre a notas, então vale cachear
+	// por janela. (Query nunca chega aqui != "" — passa direto acima.)
+	key := fmt.Sprintf("empresas|%t|%s|%s|%s|%s|%s|%d|%d",
+		f.PendentesOnly, f.Query, f.Sort, f.DateField, f.From, f.To, f.Limit, f.Offset)
 	v, err := c.get(key, func(cctx context.Context) (any, error) {
 		items, total, e := c.Store.Empresas(cctx, f)
 		if e != nil {
