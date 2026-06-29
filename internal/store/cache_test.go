@@ -66,6 +66,43 @@ func TestCached_SingleFlightAndTTL(t *testing.T) {
 	}
 }
 
+// empresaStore devolve um total atrelado ao DateField, para detectar colisão de
+// chave de cache entre filtros de data diferentes.
+type empresaStore struct {
+	Store
+	calls int32
+}
+
+func (e *empresaStore) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAgg, int, error) {
+	atomic.AddInt32(&e.calls, 1)
+	return nil, map[string]int{"emissao": 288, "imported": 488}[f.DateField], nil
+}
+
+// TestCached_EmpresasKeyIncludesDateField protege contra a regressão em que a chave
+// de cache do /empresas ignorava DateField/From/To: dois filtros de data com os mesmos
+// limit/offset/sort colidiam e o segundo recebia o resultado cacheado do primeiro
+// (em produção: "emissão" servia o número de "importação").
+func TestCached_EmpresasKeyIncludesDateField(t *testing.T) {
+	base := &empresaStore{Store: NewMemory()}
+	c := NewCached(base, time.Minute)
+	ctx := context.Background()
+	win := func(field string) EmpresaFilter {
+		return EmpresaFilter{DateField: field, From: "2026-06-01", To: "2026-06-29"}
+	}
+
+	// imported popula o cache primeiro (como aconteceu no bug em produção).
+	if _, total, _ := c.Empresas(ctx, win("imported")); total != 488 {
+		t.Fatalf("imported: esperava 488, veio %d", total)
+	}
+	// emissao com os MESMOS from/to NÃO pode herdar o resultado de imported.
+	if _, total, _ := c.Empresas(ctx, win("emissao")); total != 288 {
+		t.Fatalf("emissao colidiu com a chave de imported: esperava 288, veio %d", total)
+	}
+	if n := atomic.LoadInt32(&base.calls); n != 2 {
+		t.Fatalf("esperava 2 computes (1 por date_field), veio %d", n)
+	}
+}
+
 // TestCached_Warm garante que o aquecimento popula o cache (acesso seguinte não
 // recomputa).
 func TestCached_Warm(t *testing.T) {
