@@ -741,33 +741,79 @@ type FilialCNPJ struct {
 // direction IS NULL) e não dispara os triggers de contador (não mexe em status/empresa).
 // O root8 é computado em SQL nos dois lados (uma única fonte da verdade). Retorna
 // quantas notas foram classificadas.
+// ctidBlockChunk é quantas páginas de 8KB cada lote do backfill cobre. ~10k páginas
+// ≈ 80MB de heap por lote (alguns 100k de notas) — granularidade boa de progresso/commit.
+const ctidBlockChunk = 10000
+
 func (p *Postgres) BackfillDirection(ctx context.Context, filiais []FilialCNPJ, onProgress func(done, total int, affected int64)) (int64, error) {
-	// Um UPDATE por filial, mirando (codigo_empresa, codigo_filial) pelo índice
-	// idx_notas_empresa — toca só as notas daquela filial (subconjunto pequeno) em vez
-	// de varrer as 21M de uma vez (a versão monolítica anterior fazia seq scan e segurava
-	// uma transação de >40min). Cada Exec autocommita: leve, resumível (só toca
-	// direction IS NULL) e observável (progresso por filial). A raiz-8 da filial é
-	// calculada em Go; a do emitente/destinatário em SQL (mesma normalização).
-	const q = `
-		UPDATE notas SET direction = CASE
-		    WHEN left(regexp_replace(coalesce(cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = $3 THEN 'saida'
-		    ELSE 'entrada' END
-		WHERE codigo_empresa = $1 AND codigo_filial = $2 AND direction IS NULL
-		  AND ( left(regexp_replace(coalesce(cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = $3
-		     OR left(regexp_replace(coalesce(cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = $3 )`
-	var total int64
-	for i, f := range filiais {
-		root := digitsPrefix(f.Cnpj, 8)
-		if len(root) < 8 {
-			continue // sem raiz válida -> não dá p/ casar
+	// Estratégia: UMA passada pelo heap em faixas de ctid (Tid Range Scan), juntando uma
+	// tabelinha temporária de filiais (raiz-8 do CNPJ). Por que não "um UPDATE por filial":
+	// para as filiais GRANDES o planner ignora idx_notas_empresa e faz seq scan das 21M,
+	// então N filiais grandes viravam N varreduras completas. Varrer por ctid percorre
+	// cada página UMA vez e commita por lote (sem transação longa, resumível pois só toca
+	// direction IS NULL, observável via onProgress). A raiz-8 da filial é calculada em Go;
+	// a do emitente/destinatário em SQL (mesma normalização).
+	conn, err := p.pool.Acquire(ctx) // conexão fixa: a TEMP table vive enquanto ela existir
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Release()
+
+	emp := make([]int32, 0, len(filiais))
+	fil := make([]int32, 0, len(filiais))
+	root := make([]string, 0, len(filiais))
+	for _, f := range filiais {
+		r := digitsPrefix(f.Cnpj, 8)
+		if len(r) < 8 {
+			continue // sem raiz válida -> não casa
 		}
-		tag, err := p.pool.Exec(ctx, q, f.CodigoEmpresa, f.CodigoFilial, root)
+		emp = append(emp, int32(f.CodigoEmpresa))
+		fil = append(fil, int32(f.CodigoFilial))
+		root = append(root, r)
+	}
+	// TEMP sem ON COMMIT DROP: precisa sobreviver aos commits de cada lote (os Exec abaixo
+	// autocommitam). É dropada ao soltar a conexão.
+	if _, err := conn.Exec(ctx,
+		`CREATE TEMP TABLE _fil (codigo_empresa int, codigo_filial int, root8 text)`); err != nil {
+		return 0, err
+	}
+	if _, err := conn.Exec(ctx,
+		`INSERT INTO _fil SELECT * FROM unnest($1::int[], $2::int[], $3::text[])`, emp, fil, root); err != nil {
+		return 0, err
+	}
+
+	// Nº real de páginas (tamanho do arquivo / block_size) — sempre atual, não depende de
+	// ANALYZE (relpages do pg_class poderia estar defasado e cortar o fim da tabela).
+	var pages int64
+	if err := conn.QueryRow(ctx,
+		`SELECT pg_relation_size('notas') / current_setting('block_size')::bigint`).Scan(&pages); err != nil {
+		return 0, err
+	}
+
+	const q = `
+		UPDATE notas n SET direction = CASE
+		    WHEN left(regexp_replace(coalesce(n.cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = f.root8 THEN 'saida'
+		    ELSE 'entrada' END
+		FROM _fil f
+		WHERE n.ctid >= $1::tid AND n.ctid < $2::tid
+		  AND n.codigo_empresa = f.codigo_empresa AND n.codigo_filial = f.codigo_filial
+		  AND n.direction IS NULL
+		  AND ( left(regexp_replace(coalesce(n.cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = f.root8
+		     OR left(regexp_replace(coalesce(n.cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = f.root8 )`
+	var total int64
+	for lo := int64(0); lo <= pages; lo += ctidBlockChunk {
+		hi := lo + ctidBlockChunk
+		tag, err := conn.Exec(ctx, q, fmt.Sprintf("(%d,0)", lo), fmt.Sprintf("(%d,0)", hi))
 		if err != nil {
-			return total, fmt.Errorf("filial %d/%d: %w", f.CodigoEmpresa, f.CodigoFilial, err)
+			return total, fmt.Errorf("bloco de páginas [%d,%d): %w", lo, hi, err)
 		}
 		total += tag.RowsAffected()
-		if onProgress != nil && (i+1)%50 == 0 {
-			onProgress(i+1, len(filiais), total)
+		if onProgress != nil {
+			done := hi
+			if done > pages {
+				done = pages
+			}
+			onProgress(int(done), int(pages), total)
 		}
 	}
 	return total, nil
