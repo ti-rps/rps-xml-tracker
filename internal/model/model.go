@@ -16,6 +16,47 @@ func NumeroNota(chave string) string {
 	return strings.TrimLeft(chave[25:34], "0")
 }
 
+// Direção da nota relativa à empresa monitorada: SAÍDA = a empresa (codigo_empresa/
+// codigo_filial) é a EMITENTE; ENTRADA = é a DESTINATÁRIA. "" quando indeterminada
+// (sem empresa, ou CNPJ da empresa não casa nenhum dos lados).
+const (
+	DirEntrada = "entrada"
+	DirSaida   = "saida"
+)
+
+// cnpjRoot8 retorna a raiz (8 primeiros dígitos) de um CNPJ, ignorando não-dígitos. A
+// raiz identifica o grupo econômico (compartilhada entre filiais), então casa a empresa
+// mesmo quando o documento traz o CNPJ de outra filial do mesmo grupo. "" se < 8 dígitos.
+func cnpjRoot8(cnpj string) string {
+	var b strings.Builder
+	for _, r := range cnpj {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			if b.Len() == 8 {
+				return b.String()
+			}
+		}
+	}
+	return ""
+}
+
+// DirectionFromCNPJs decide a direção comparando a raiz do CNPJ da empresa (filial) com
+// a do emitente/destinatário. Testa emitente primeiro: intra-grupo (a empresa é emitente
+// E destinatária) classifica como "saida". "" se a raiz da empresa não casa nenhum lado.
+func DirectionFromCNPJs(empresaCNPJ, cnpjEmitente, cnpjDestinatario string) string {
+	r := cnpjRoot8(empresaCNPJ)
+	if r == "" {
+		return ""
+	}
+	switch r {
+	case cnpjRoot8(cnpjEmitente):
+		return DirSaida
+	case cnpjRoot8(cnpjDestinatario):
+		return DirEntrada
+	}
+	return ""
+}
+
 // DocType is the authoritative document type, derived from the agent's XML parse
 // (Firebird's TIPODOCUMENTO is unreliable — see Fase 0 findings).
 type DocType string
@@ -83,6 +124,7 @@ type Observation struct {
 	NomeDestinatario string         `json:"nome_destinatario,omitempty"`
 	DataEmissao      string         `json:"data_emissao,omitempty"` // yyyy-mm-dd
 	ValorTotal       *float64       `json:"valor_total,omitempty"`
+	Direction        string         `json:"direction,omitempty"` // entrada|saida (lado da empresa); "" = indeterminada
 	Payload          map[string]any `json:"payload,omitempty"`
 }
 
@@ -101,6 +143,7 @@ type Nota struct {
 	NomeDestinatario string     `json:"nome_destinatario,omitempty"`
 	DataEmissao      string     `json:"data_emissao,omitempty"`
 	ValorTotal       *float64   `json:"valor_total,omitempty"`
+	Direction        string     `json:"direction,omitempty"` // entrada|saida; omitido quando indeterminada
 	ArrivedAt        *time.Time `json:"arrived_at,omitempty"`
 	SyncedAt         *time.Time `json:"synced_at,omitempty"`
 	PendingAt        *time.Time `json:"pending_at,omitempty"` // visto no Athenas aguardando importação
@@ -134,8 +177,13 @@ type StatusCounts struct {
 // Overview is the dashboard's summary cards.
 type Overview struct {
 	StatusCounts
-	InTransit     int `json:"in_transit"` // arrived + synced
-	ImportedToday int `json:"imported_today"`
+	// Mode = "flow" quando as contagens foram recomputadas dentro de uma janela de data
+	// (notas cujo date_field caiu em [from,to], agrupadas por status atual), em vez do
+	// estoque atual global. Omitido (snapshot) sem janela. ImportedToday e as latências
+	// seguem globais/30d mesmo no modo flow.
+	Mode          string `json:"mode,omitempty"`
+	InTransit     int    `json:"in_transit"` // arrived + synced
+	ImportedToday int    `json:"imported_today"`
 	// latências (segundos); nil quando não há amostra
 	LatArrivalSyncP50S *int64 `json:"lat_arrival_sync_p50_s,omitempty"`
 	LatArrivalSyncP95S *int64 `json:"lat_arrival_sync_p95_s,omitempty"`

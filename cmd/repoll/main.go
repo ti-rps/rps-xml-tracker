@@ -35,6 +35,10 @@ func main() {
 	// observed_at). Não faz o repoll de import_ignored (é um modo à parte).
 	fixImportedAt := flag.Bool("fix-imported-at", false, "corrige retroativamente o fuso do imported_at das notas importadas desde --since")
 	since := flag.String("since", "", "janela da correção do imported_at (YYYY-MM-DD); vazio = últimos 30 dias")
+	// --backfill-direction: modo separado — preenche notas.direction (onde NULL) das
+	// notas já gravadas, lendo o CNPJ por filial do Athenas (TABFILIAL) e comparando a
+	// raiz com o emitente/destinatário. One-off, idempotente.
+	backfillDirection := flag.Bool("backfill-direction", false, "preenche notas.direction retroativamente a partir do CNPJ das filiais (TABFILIAL)")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -76,6 +80,24 @@ func main() {
 		}
 		log.Printf("fix-imported-at concluído: checadas=%d corrigidas=%d já_ok=%d sem_data_firebird=%d sumidas=%d",
 			res.Checked, res.Corrected, res.AlreadyOK, res.NoFirebird, res.NotFound)
+		return
+	}
+
+	if *backfillDirection {
+		log.Printf("repoll: backfill da direção — lendo CNPJ das filiais (TABFILIAL)...")
+		filiais, err := rd.ListFiliais(ctx)
+		if err != nil {
+			log.Fatalf("backfill-direction: listar filiais: %v", err)
+		}
+		fc := make([]store.FilialCNPJ, len(filiais))
+		for i, f := range filiais {
+			fc[i] = store.FilialCNPJ{CodigoEmpresa: f.CodigoEmpresa, CodigoFilial: f.CodigoFilial, Cnpj: f.Cnpj}
+		}
+		n, err := pg.BackfillDirection(ctx, fc)
+		if err != nil {
+			log.Fatalf("backfill-direction: %v", err)
+		}
+		log.Printf("backfill-direction concluído: %d filiais lidas, %d notas classificadas (entrada/saida)", len(fc), n)
 		return
 	}
 

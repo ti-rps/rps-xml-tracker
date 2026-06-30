@@ -195,14 +195,18 @@ func (m *Memory) allNotas() []model.Nota {
 	return out
 }
 
-func (m *Memory) Overview(_ context.Context) (model.Overview, error) {
+func (m *Memory) Overview(_ context.Context, f OverviewFilter) (model.Overview, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var ov model.Overview
 	today := time.Now().Format("2006-01-02")
 	var arr, syn []int64
 	for _, n := range m.allNotas() {
-		addStatus(&ov.StatusCounts, n.Status)
+		// contagens por status respeitam a janela/filtros; imported_today e latências
+		// seguem globais (paridade com o Postgres).
+		if overviewMatches(n, f) {
+			addStatus(&ov.StatusCounts, n.Status)
+		}
 		if n.ImportedAt != nil && n.ImportedAt.Format("2006-01-02") == today {
 			ov.ImportedToday++
 		}
@@ -212,6 +216,9 @@ func (m *Memory) Overview(_ context.Context) (model.Overview, error) {
 		if n.LatSyncImportS != nil {
 			syn = append(syn, *n.LatSyncImportS)
 		}
+	}
+	if f.windowed() {
+		ov.Mode = "flow"
 	}
 	ov.InTransit = ov.Arrived + ov.Synced
 	ov.LatArrivalSyncP50S, ov.LatArrivalSyncP95S = pctl(arr, 0.50), pctl(arr, 0.95)
@@ -359,6 +366,9 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 		if f.DocType != "" && n.DocType != f.DocType {
 			continue
 		}
+		if f.Direction != "" && n.Direction != f.Direction {
+			continue
+		}
 		// Notas sem empresa colapsam numa única linha "Sem empresa" (emp/fil NULL).
 		var k key
 		var a *model.EmpresaAgg
@@ -468,6 +478,9 @@ func agingMatches(n model.Nota, f AgingFilter) bool {
 	if f.DocType != "" && n.DocType != f.DocType {
 		return false
 	}
+	if f.Direction != "" && n.Direction != f.Direction {
+		return false
+	}
 	return true
 }
 
@@ -542,6 +555,24 @@ func (m *Memory) spansFor(chave string) []model.Observation {
 	return spans
 }
 
+// overviewMatches aplica a janela de data + filtros do OverviewFilter a uma nota
+// (espelha overviewWhere do Postgres).
+func overviewMatches(n model.Nota, f OverviewFilter) bool {
+	if !inDateWindow(n, f.DateField, f.From, f.To) {
+		return false
+	}
+	if f.CodigoEmpresa != nil && (n.CodigoEmpresa == nil || *n.CodigoEmpresa != *f.CodigoEmpresa) {
+		return false
+	}
+	if f.CodigoFilial != nil && (n.CodigoFilial == nil || *n.CodigoFilial != *f.CodigoFilial) {
+		return false
+	}
+	if f.DocType != "" && n.DocType != f.DocType {
+		return false
+	}
+	return true
+}
+
 func matches(n model.Nota, f NotaFilter) bool {
 	if f.Status != "" && n.Status != f.Status {
 		return false
@@ -568,6 +599,9 @@ func matches(n model.Nota, f NotaFilter) bool {
 		return false
 	}
 	if f.Numero != "" && !strings.HasPrefix(n.NumeroNota, f.Numero) {
+		return false
+	}
+	if f.Direction != "" && n.Direction != f.Direction {
 		return false
 	}
 	if !inDateWindow(n, f.DateField, f.From, f.To) {

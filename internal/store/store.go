@@ -46,8 +46,10 @@ type Store interface {
 	// DESTRUTIVO: usado só na correção retroativa do fuso do imported_at.
 	UpdateImportedObservedAt(ctx context.Context, chave string, observedAt time.Time) (bool, error)
 
-	// Overview returns the dashboard summary cards.
-	Overview(ctx context.Context) (model.Overview, error)
+	// Overview returns the dashboard summary cards. Com OverviewFilter vazio = estoque
+	// atual global (snapshot). Com janela de data e/ou filtros = recompute ao vivo das
+	// contagens por status (mode="flow"); imported_today e latências seguem globais/30d.
+	Overview(ctx context.Context, f OverviewFilter) (model.Overview, error)
 
 	// Timeseries returns time-bucketed pipeline flow + latency percentiles for the
 	// Painel v2 charts (série contínua, zero-fill nas contagens, nil nas latências).
@@ -84,6 +86,7 @@ type EmpresaFilter struct {
 	Query         string        // busca por nome da empresa (ILIKE); vazio = todas
 	Sort          string        // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
 	DocType       model.DocType // filtra por tipo de documento; força recompute ao vivo (o contador não tem essa dimensão)
+	Direction     string        // entrada|saida; também força recompute ao vivo
 	// faixa de data sobre o campo escolhido (mesmos nomes do GET /notas):
 	// emissao|arrived|synced|imported. Quando preenchida, os agregados são
 	// recomputados ao vivo da notas (o contador empresa_counts não tem dimensão
@@ -100,6 +103,30 @@ type AgingFilter struct {
 	CodigoEmpresa *int
 	CodigoFilial  *int
 	DocType       model.DocType
+	Direction     string // entrada|saida
+}
+
+// OverviewFilter restringe o overview (GET /metrics/overview). Tudo opcional; vazio =
+// snapshot global. Com janela (date_field+from/to) e/ou empresa/filial/doc_type, as
+// contagens por status são recomputadas ao vivo dentro do recorte.
+type OverviewFilter struct {
+	DateField     string // emissao|arrived|synced|imported
+	From          string // yyyy-mm-dd (inclusive)
+	To            string // yyyy-mm-dd (inclusive)
+	CodigoEmpresa *int
+	CodigoFilial  *int
+	DocType       model.DocType
+}
+
+// windowed reporta se há uma janela de data válida (date_field reconhecido + from/to).
+func (f OverviewFilter) windowed() bool {
+	return dateColumn(f.DateField) != "" && (f.From != "" || f.To != "")
+}
+
+// live reporta se o overview precisa recomputar ao vivo (janela e/ou filtros) em vez de
+// ler o contador notas_counts (snapshot global).
+func (f OverviewFilter) live() bool {
+	return f.windowed() || f.CodigoEmpresa != nil || f.CodigoFilial != nil || f.DocType != ""
 }
 
 // TimeseriesFilter holds the timeseries query params (já validados no handler).
@@ -127,6 +154,7 @@ type NotaFilter struct {
 	Cnpj          string // LIKE em cnpj_emitente OU cnpj_destinatario
 	ChaveQuery    string // partial/full chave
 	Numero        string // prefixo do número da nota (nNF derivado da chave); distinto de ChaveQuery
+	Direction     string // entrada|saida (lado da empresa)
 	// faixa de data sobre o campo escolhido: emissao|arrived|synced|imported
 	DateField string
 	From      string // yyyy-mm-dd (inclusive)

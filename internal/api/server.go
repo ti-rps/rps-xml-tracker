@@ -93,7 +93,23 @@ func (s *Server) routes() {
 }
 
 func (s *Server) handleOverview(c *gin.Context) {
-	ov, err := s.st.Overview(c.Request.Context())
+	f := store.OverviewFilter{
+		DateField: c.Query("date_field"), // emissao|arrived|synced|imported
+		From:      c.Query("from"),        // yyyy-mm-dd (inclusive)
+		To:        c.Query("to"),          // yyyy-mm-dd (inclusive)
+		DocType:   model.DocType(c.Query("doc_type")),
+	}
+	if v := c.Query("codigo_empresa"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.CodigoEmpresa = &n
+		}
+	}
+	if v := c.Query("codigo_filial"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			f.CodigoFilial = &n
+		}
+	}
+	ov, err := s.st.Overview(c.Request.Context(), f)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular overview"})
 		return
@@ -160,7 +176,7 @@ func (s *Server) handleDocTypes(c *gin.Context) {
 }
 
 func (s *Server) handleAging(c *gin.Context) {
-	f := store.AgingFilter{DocType: model.DocType(c.Query("doc_type"))}
+	f := store.AgingFilter{DocType: model.DocType(c.Query("doc_type")), Direction: c.Query("direction")}
 	if v := c.Query("codigo_empresa"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			f.CodigoEmpresa = &n
@@ -194,6 +210,7 @@ func (s *Server) handleEmpresas(c *gin.Context) {
 		Query:         c.Query("q"),
 		Sort:          c.Query("sort"),
 		DocType:       model.DocType(c.Query("doc_type")), // NFE|NFCE|CTE|NFS|EVENTO|UNKNOWN
+		Direction:     c.Query("direction"),               // entrada|saida
 		DateField:     c.Query("date_field"),              // emissao|arrived|synced|imported
 		From:          c.Query("from"),                    // yyyy-mm-dd (inclusive)
 		To:            c.Query("to"),                      // yyyy-mm-dd (inclusive)
@@ -273,6 +290,7 @@ func (s *Server) handleListNotas(c *gin.Context) {
 		Cnpj:         c.Query("cnpj"),
 		ChaveQuery:   c.Query("q"),
 		Numero:       onlyDigits(c.Query("numero")),
+		Direction:    c.Query("direction"), // entrada|saida
 		DateField:    c.Query("date_field"),
 		From:         c.Query("from"),
 		To:           c.Query("to"),

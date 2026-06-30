@@ -65,7 +65,7 @@ func TestOverviewAndEmpresas(t *testing.T) {
 		obsFor("C", model.StageArrival, model.EventFileSeen, t0, 1100),
 	})
 
-	ov, err := m.Overview(ctx)
+	ov, err := m.Overview(ctx, OverviewFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}

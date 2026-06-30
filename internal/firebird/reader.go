@@ -41,6 +41,7 @@ type EmpresaImport struct {
 	NomeEmitente     string
 	CnpjDestinatario string
 	NomeDestinatario string
+	CnpjFilial       string // CNPJ da filial dona desta linha (TABFILIAL); define a direção
 	DataEmissao      string // yyyy-mm-dd
 	ValorTotal       *float64
 	DataRobo         *time.Time // quando o robô importou (DATAROBO); nil se não passou pelo robô
@@ -66,6 +67,7 @@ type ImportState struct {
 	NomeEmitente     string
 	CnpjDestinatario string
 	NomeDestinatario string
+	CnpjFilial       string // CNPJ da filial selecionada (TABFILIAL); o poller deriva a direção dele
 	DataEmissao      string // yyyy-mm-dd
 	ValorTotal       *float64
 	DataRobo         *time.Time // quando o robô importou (DATAROBO da linha selecionada); nil = não passou pelo robô
@@ -147,9 +149,11 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 	}
 	q := `SELECT t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
 	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
-	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO, t.DATAINCLUSAO
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO, t.DATAINCLUSAO,
+	             fil.CNPJ
 	      FROM TABLISTACHAVEACESSO t
 	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
+	      LEFT JOIN TABFILIAL fil ON fil.CODIGOEMPRESA = t.CODIGOEMPRESA AND fil.CODIGO = t.CODIGOFILIAL
 	      WHERE t.CHAVEACESSO IN (` + placeholders + `)`
 	rows, err := r.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -171,9 +175,11 @@ func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string
 	q := `SELECT FIRST 10000
 	             t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
 	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
-	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO, t.DATAINCLUSAO
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO, t.DATAINCLUSAO,
+	             fil.CNPJ
 	      FROM TABLISTACHAVEACESSO t
 	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
+	      LEFT JOIN TABFILIAL fil ON fil.CODIGOEMPRESA = t.CODIGOEMPRESA AND fil.CODIGO = t.CODIGOFILIAL
 	      WHERE t.IMPORTADO = 1
 	        AND t.DATAINCLUSAO > ?`
 	rows, err := r.db.QueryContext(ctx, q, since)
@@ -190,6 +196,37 @@ func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string
 		out[chave] = selectState(chave, rowList)
 	}
 	return out, nil
+}
+
+// Filial é uma filial cadastrada no Athenas (TABFILIAL): a chave composta
+// (CODIGOEMPRESA, CODIGO) e o CNPJ do estabelecimento.
+type Filial struct {
+	CodigoEmpresa int
+	CodigoFilial  int
+	Cnpj          string
+}
+
+// ListFiliais lê todas as filiais (TABFILIAL) com seu CNPJ, para o backfill retroativo
+// da direção. São poucas centenas de linhas — uma varredura barata. READ-ONLY.
+func (r *Reader) ListFiliais(ctx context.Context) ([]Filial, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT CODIGOEMPRESA, CODIGO, CNPJ FROM TABFILIAL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Filial
+	for rows.Next() {
+		var ce, cf sql.NullInt64
+		var cnpj sql.NullString
+		if err := rows.Scan(&ce, &cf, &cnpj); err != nil {
+			return nil, err
+		}
+		if !ce.Valid || !cf.Valid {
+			continue // sem chave composta -> não dá p/ casar com a nota
+		}
+		out = append(out, Filial{CodigoEmpresa: int(ce.Int64), CodigoFilial: int(cf.Int64), Cnpj: trimNull(cnpj)})
+	}
+	return out, rows.Err()
 }
 
 // scanRows escaneia as colunas padrão de TABLISTACHAVEACESSO (SELECT t.CHAVEACESSO,
@@ -209,10 +246,11 @@ func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 			nomeEmpresa    sql.NullString
 			dataRobo       sql.NullTime
 			dataInclusao   sql.NullTime
+			cnpjFil        sql.NullString
 		)
 		if err := rows.Scan(&chave, &imp, &ign, &motivo, &sit, &tipo,
 			&codEmp, &codFil, &cnpjE, &cnpjD, &nomeE, &nomeD, &emissao, &valor,
-			&nomeEmpresa, &dataRobo, &dataInclusao); err != nil {
+			&nomeEmpresa, &dataRobo, &dataInclusao, &cnpjFil); err != nil {
 			return err
 		}
 		chave = strings.TrimSpace(chave)
@@ -226,6 +264,7 @@ func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 			NomeEmitente:     trimNull(nomeE),
 			CnpjDestinatario: trimNull(cnpjD),
 			NomeDestinatario: trimNull(nomeD),
+			CnpjFilial:       trimNull(cnpjFil),
 		}
 		if sit.Valid {
 			v := int(sit.Int64)
@@ -334,6 +373,7 @@ func applyMeta(st *ImportState, rep EmpresaImport, rows []EmpresaImport) {
 	st.CodigoEmpresa = rep.CodigoEmpresa
 	st.CodigoFilial = rep.CodigoFilial
 	st.NomeEmpresa = rep.NomeEmpresa
+	st.CnpjFilial = rep.CnpjFilial // empresa-specific (da filial selecionada), como o nome
 	st.Motivo = rep.Motivo
 	st.Situacao = rep.Situacao
 	st.TipoDocumento = rep.TipoDocumento
