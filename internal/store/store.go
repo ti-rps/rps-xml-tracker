@@ -60,6 +60,11 @@ type Store interface {
 	// bucket since arrival (notas presas na fila). Faixas em model.BacklogBuckets.
 	BacklogAge(ctx context.Context) ([]model.BacklogBucket, error)
 
+	// Aging returns the pending backlog bucketed by age, split into the two waits:
+	// to_sync (status arrived, idade desde arrived_at) e to_import (status synced/
+	// pending_import, idade desde synced_at). Filtrável por empresa/filial/doc_type.
+	Aging(ctx context.Context, f AgingFilter) (model.Aging, error)
+
 	// Empresas returns the per-empresa status breakdown. total is the number of
 	// empresas matching the filter (before limit/offset), for pagination.
 	Empresas(ctx context.Context, f EmpresaFilter) (items []model.EmpresaAgg, total int, err error)
@@ -75,9 +80,10 @@ type Store interface {
 
 // EmpresaFilter holds the supported per-empresa aggregation filters.
 type EmpresaFilter struct {
-	PendentesOnly bool   // só empresas com itens não-terminais (arrived/synced/pending_import/stuck)
-	Query         string // busca por nome da empresa (ILIKE); vazio = todas
-	Sort          string // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
+	PendentesOnly bool          // só empresas com itens não-terminais (arrived/synced/pending_import/stuck)
+	Query         string        // busca por nome da empresa (ILIKE); vazio = todas
+	Sort          string        // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
+	DocType       model.DocType // filtra por tipo de documento; força recompute ao vivo (o contador não tem essa dimensão)
 	// faixa de data sobre o campo escolhido (mesmos nomes do GET /notas):
 	// emissao|arrived|synced|imported. Quando preenchida, os agregados são
 	// recomputados ao vivo da notas (o contador empresa_counts não tem dimensão
@@ -87,6 +93,13 @@ type EmpresaFilter struct {
 	To        string // yyyy-mm-dd (inclusive)
 	Limit     int    // <=0 retorna todas (sem paginação)
 	Offset    int
+}
+
+// AgingFilter restringe o aging do backlog (GET /metrics/aging). Todos opcionais.
+type AgingFilter struct {
+	CodigoEmpresa *int
+	CodigoFilial  *int
+	DocType       model.DocType
 }
 
 // TimeseriesFilter holds the timeseries query params (já validados no handler).
@@ -113,6 +126,7 @@ type NotaFilter struct {
 	EmpresaQuery  string // LIKE em empresa_nome
 	Cnpj          string // LIKE em cnpj_emitente OU cnpj_destinatario
 	ChaveQuery    string // partial/full chave
+	Numero        string // prefixo do número da nota (nNF derivado da chave); distinto de ChaveQuery
 	// faixa de data sobre o campo escolhido: emissao|arrived|synced|imported
 	DateField string
 	From      string // yyyy-mm-dd (inclusive)
