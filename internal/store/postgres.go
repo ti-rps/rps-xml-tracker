@@ -741,43 +741,48 @@ type FilialCNPJ struct {
 // direction IS NULL) e não dispara os triggers de contador (não mexe em status/empresa).
 // O root8 é computado em SQL nos dois lados (uma única fonte da verdade). Retorna
 // quantas notas foram classificadas.
-func (p *Postgres) BackfillDirection(ctx context.Context, filiais []FilialCNPJ) (int64, error) {
-	emp := make([]int32, len(filiais))
-	fil := make([]int32, len(filiais))
-	cnpj := make([]string, len(filiais))
-	for i, f := range filiais {
-		emp[i], fil[i], cnpj[i] = int32(f.CodigoEmpresa), int32(f.CodigoFilial), f.Cnpj
-	}
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx,
-		`CREATE TEMP TABLE _fil (codigo_empresa int, codigo_filial int, root8 text) ON COMMIT DROP`); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO _fil SELECT e, f, left(regexp_replace(c, '[^0-9]', '', 'g'), 8)
-		   FROM unnest($1::int[], $2::int[], $3::text[]) AS t(e, f, c)`, emp, fil, cnpj); err != nil {
-		return 0, err
-	}
-	tag, err := tx.Exec(ctx, `
-		UPDATE notas n SET direction = CASE
-		    WHEN left(regexp_replace(coalesce(n.cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = x.root8 THEN 'saida'
+func (p *Postgres) BackfillDirection(ctx context.Context, filiais []FilialCNPJ, onProgress func(done, total int, affected int64)) (int64, error) {
+	// Um UPDATE por filial, mirando (codigo_empresa, codigo_filial) pelo índice
+	// idx_notas_empresa — toca só as notas daquela filial (subconjunto pequeno) em vez
+	// de varrer as 21M de uma vez (a versão monolítica anterior fazia seq scan e segurava
+	// uma transação de >40min). Cada Exec autocommita: leve, resumível (só toca
+	// direction IS NULL) e observável (progresso por filial). A raiz-8 da filial é
+	// calculada em Go; a do emitente/destinatário em SQL (mesma normalização).
+	const q = `
+		UPDATE notas SET direction = CASE
+		    WHEN left(regexp_replace(coalesce(cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = $3 THEN 'saida'
 		    ELSE 'entrada' END
-		FROM _fil x
-		WHERE n.codigo_empresa = x.codigo_empresa AND n.codigo_filial = x.codigo_filial
-		  AND n.direction IS NULL AND length(x.root8) = 8
-		  AND ( left(regexp_replace(coalesce(n.cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = x.root8
-		     OR left(regexp_replace(coalesce(n.cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = x.root8 )`)
-	if err != nil {
-		return 0, err
+		WHERE codigo_empresa = $1 AND codigo_filial = $2 AND direction IS NULL
+		  AND ( left(regexp_replace(coalesce(cnpj_emitente,''), '[^0-9]', '', 'g'), 8) = $3
+		     OR left(regexp_replace(coalesce(cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = $3 )`
+	var total int64
+	for i, f := range filiais {
+		root := digitsPrefix(f.Cnpj, 8)
+		if len(root) < 8 {
+			continue // sem raiz válida -> não dá p/ casar
+		}
+		tag, err := p.pool.Exec(ctx, q, f.CodigoEmpresa, f.CodigoFilial, root)
+		if err != nil {
+			return total, fmt.Errorf("filial %d/%d: %w", f.CodigoEmpresa, f.CodigoFilial, err)
+		}
+		total += tag.RowsAffected()
+		if onProgress != nil && (i+1)%50 == 0 {
+			onProgress(i+1, len(filiais), total)
+		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return 0, err
+	return total, nil
+}
+
+// digitsPrefix retorna os primeiros n dígitos de s (ignorando não-dígitos). Usado p/
+// extrair a raiz do CNPJ da filial no backfill da direção.
+func digitsPrefix(s string, n int) string {
+	b := make([]byte, 0, n)
+	for i := 0; i < len(s) && len(b) < n; i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			b = append(b, s[i])
+		}
 	}
-	return tag.RowsAffected(), nil
+	return string(b)
 }
 
 // orderedAging monta as faixas do aging na ordem canônica (incluindo vazias=0), com

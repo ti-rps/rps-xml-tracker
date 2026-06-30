@@ -93,9 +93,12 @@ func main() {
 		for i, f := range filiais {
 			fc[i] = store.FilialCNPJ{CodigoEmpresa: f.CodigoEmpresa, CodigoFilial: f.CodigoFilial, Cnpj: f.Cnpj}
 		}
-		n, err := pg.BackfillDirection(ctx, fc)
+		log.Printf("backfill da direção: %d filiais — processando uma por vez (lotes por filial)...", len(fc))
+		n, err := pg.BackfillDirection(ctx, fc, func(done, total int, affected int64) {
+			log.Printf("  progresso: %d/%d filiais, %d notas classificadas até aqui", done, total, affected)
+		})
 		if err != nil {
-			log.Fatalf("backfill-direction: %v", err)
+			log.Fatalf("backfill-direction: %v (parcial: %d notas já classificadas)", err, n)
 		}
 		log.Printf("backfill-direction concluído: %d filiais lidas, %d notas classificadas (entrada/saida)", len(fc), n)
 		return
