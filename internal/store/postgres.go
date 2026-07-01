@@ -111,9 +111,9 @@ func (p *Postgres) GetNota(ctx context.Context, chave string) (model.NotaDetail,
 	return model.NotaDetail{Nota: n, Spans: spans}, true, nil
 }
 
-func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, int, error) {
-	var where []string
-	var args []any
+// notaWhere monta as condições WHERE (numeradas $1..$N) a partir do NotaFilter.
+// Compartilhado por ListNotas e SummaryNotas para os filtros ficarem SEMPRE idênticos.
+func notaWhere(f NotaFilter) (where []string, args []any) {
 	add := func(cond string, val any) {
 		args = append(args, val)
 		where = append(where, fmt.Sprintf(cond, len(args)))
@@ -167,6 +167,27 @@ func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, i
 			add(col+" <= $%d::date", f.To)
 		}
 	}
+	return where, args
+}
+
+// SummaryNotas devolve, para o MESMO filtro de ListNotas, quantas notas casam e a soma
+// de valor_total (para apuração — ex.: total de NFC-e do período). Um count(*)+sum() em
+// vez da lista paginada.
+func (p *Postgres) SummaryNotas(ctx context.Context, f NotaFilter) (model.NotaSummary, error) {
+	var s model.NotaSummary
+	where, args := notaWhere(f)
+	clause := ""
+	if len(where) > 0 {
+		clause = " WHERE " + strings.Join(where, " AND ")
+	}
+	err := p.pool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(sum(valor_total),0)::float8 FROM notas`+clause, args...).
+		Scan(&s.Count, &s.ValorTotal)
+	return s, err
+}
+
+func (p *Postgres) ListNotas(ctx context.Context, f NotaFilter) ([]model.Nota, int, error) {
+	where, args := notaWhere(f)
 	clause := ""
 	if len(where) > 0 {
 		clause = " WHERE " + strings.Join(where, " AND ")

@@ -81,6 +81,7 @@ func (s *Server) routes() {
 	// reads — maestro JWT
 	read := v1.Group("", jwtAuth(s.cfg.JWTSecret))
 	read.GET("/notas", s.handleListNotas)
+	read.GET("/notas/summary", s.handleNotasSummary) // estático antes do :chave
 	read.GET("/notas/:chave", s.handleGetNota)
 	read.GET("/metrics/overview", s.handleOverview)
 	read.GET("/metrics/timeseries", s.handleTimeseries)
@@ -281,7 +282,9 @@ func (s *Server) handleGetNota(c *gin.Context) {
 	c.JSON(http.StatusOK, detail)
 }
 
-func (s *Server) handleListNotas(c *gin.Context) {
+// notaFilterFromQuery lê os filtros de /notas da querystring (compartilhado por
+// handleListNotas e handleNotasSummary p/ os filtros ficarem idênticos).
+func notaFilterFromQuery(c *gin.Context) store.NotaFilter {
 	f := store.NotaFilter{
 		Status:       model.NotaStatus(c.Query("status")),
 		DocType:      model.DocType(c.Query("doc_type")),
@@ -307,6 +310,20 @@ func (s *Server) handleListNotas(c *gin.Context) {
 			f.CodigoFilial = &n
 		}
 	}
+	return f
+}
+
+func (s *Server) handleNotasSummary(c *gin.Context) {
+	sum, err := s.st.SummaryNotas(c.Request.Context(), notaFilterFromQuery(c))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao somar notas"})
+		return
+	}
+	c.JSON(http.StatusOK, sum)
+}
+
+func (s *Server) handleListNotas(c *gin.Context) {
+	f := notaFilterFromQuery(c)
 	items, total, err := s.st.ListNotas(c.Request.Context(), f)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao listar notas"})
