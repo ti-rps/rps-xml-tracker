@@ -478,19 +478,31 @@ func (p *Postgres) Overview(ctx context.Context, f OverviewFilter) (model.Overvi
 	// Percentis sobre uma JANELA MÓVEL (últimos 30 dias) do campo de início de
 	// cada métrica. Isso exclui o backfill histórico, cujo arrived_at é o ModTime
 	// antigo do arquivo (não uma transição chegada->sync real) e inflava o p50/p95.
-	// percentile_cont é ordered-set agg e não aceita FILTER, então cada um é uma
-	// subquery com seu próprio recorte (arrived_at p/ chegada->sync, synced_at p/
-	// sync->import). Janela tunável via latencyWindow.
+	//
+	// Latência CENSURADA: em vez de lat_*_s (que é NULL enquanto a transição não
+	// completa -> percentile_cont ignora NULL -> viés de sobrevivência, mostrava só os
+	// rápidos que passaram e escondia os travados há semanas), usamos o tempo DECORRIDO
+	// = COALESCE(fim, now()) - início. Assim uma nota parada há 13 dias entra com "13d"
+	// e o p95 reflete a fila real. Incluímos as ainda-em-espera (status compatível) e
+	// excluímos as terminais que nunca vão completar aquela transição (ex.: import_ignored
+	// não conta na sync->import). percentile_cont é ordered-set agg (sem FILTER), então
+	// cada percentil é uma subquery. Janela tunável via latencyWindow.
+	const arrDur = "EXTRACT(epoch FROM COALESCE(synced_at, now()) - arrived_at)"
+	const synDur = "EXTRACT(epoch FROM COALESCE(imported_at, now()) - synced_at)"
 	var a50, a95, s50, s95 *float64
 	if err := p.pool.QueryRow(ctx, `SELECT
-		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s)
-		   FROM notas WHERE arrived_at >= now() - $1::interval),
-		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s)
-		   FROM notas WHERE arrived_at >= now() - $1::interval),
-		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_sync_import_s)
-		   FROM notas WHERE synced_at  >= now() - $1::interval),
-		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_sync_import_s)
-		   FROM notas WHERE synced_at  >= now() - $1::interval)`,
+		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY `+arrDur+`)
+		   FROM notas WHERE arrived_at >= now() - $1::interval
+		     AND (synced_at IS NOT NULL OR status = 'arrived'::nota_status)),
+		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY `+arrDur+`)
+		   FROM notas WHERE arrived_at >= now() - $1::interval
+		     AND (synced_at IS NOT NULL OR status = 'arrived'::nota_status)),
+		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY `+synDur+`)
+		   FROM notas WHERE synced_at  >= now() - $1::interval
+		     AND (imported_at IS NOT NULL OR status IN ('synced','pending_import'))),
+		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY `+synDur+`)
+		   FROM notas WHERE synced_at  >= now() - $1::interval
+		     AND (imported_at IS NOT NULL OR status IN ('synced','pending_import')))`,
 		latencyWindow).Scan(&a50, &a95, &s50, &s95); err != nil {
 		return ov, err
 	}
