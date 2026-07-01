@@ -90,6 +90,22 @@ func (m *Memory) ListNotas(_ context.Context, f NotaFilter) ([]model.Nota, int, 
 	return all[lo:hi], total, nil
 }
 
+func (m *Memory) SummaryNotas(_ context.Context, f NotaFilter) (model.NotaSummary, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var s model.NotaSummary
+	for _, n := range m.allNotas() {
+		if !matches(n, f) {
+			continue
+		}
+		s.Count++
+		if n.ValorTotal != nil {
+			s.ValorTotal += *n.ValorTotal
+		}
+	}
+	return s, nil
+}
+
 func (m *Memory) ListInflightChaves(_ context.Context, limit int) ([]string, error) {
 	m.mu.Lock() // Lock (não RLock): também atualiza lastPolled (rotação)
 	defer m.mu.Unlock()

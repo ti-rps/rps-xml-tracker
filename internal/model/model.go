@@ -163,6 +163,13 @@ type NotaDetail struct {
 	Spans []Observation `json:"spans"`
 }
 
+// NotaSummary é o agregado do conjunto que casa um filtro (mesmos filtros do GET /notas):
+// quantas notas e a soma de valor_total. Para apuração rápida no painel (ex.: NFC-e do mês).
+type NotaSummary struct {
+	Count      int     `json:"count"`
+	ValorTotal float64 `json:"valor_total"`
+}
+
 // StatusCounts holds per-status totals (shared by overview and per-empresa).
 type StatusCounts struct {
 	Arrived       int `json:"arrived"`

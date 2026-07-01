@@ -23,6 +23,10 @@ type Store interface {
 	// ListNotas returns derived notas matching the filter (limit/offset paging).
 	ListNotas(ctx context.Context, f NotaFilter) (items []model.Nota, total int, err error)
 
+	// SummaryNotas returns count + sum(valor_total) for the SAME filter as ListNotas
+	// (apuração — ex.: total das NFC-e do período), sem paginar.
+	SummaryNotas(ctx context.Context, f NotaFilter) (model.NotaSummary, error)
+
 	// ListInflightChaves returns chaves still in flight (status arrived/synced —
 	// not yet imported/import_ignored), for the chave-driven Firebird poller.
 	ListInflightChaves(ctx context.Context, limit int) ([]string, error)
