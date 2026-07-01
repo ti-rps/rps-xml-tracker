@@ -199,7 +199,8 @@ func (m *Memory) Overview(_ context.Context, f OverviewFilter) (model.Overview, 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var ov model.Overview
-	today := time.Now().Format("2006-01-02")
+	now := time.Now()
+	today := now.Format("2006-01-02")
 	var arr, syn []int64
 	for _, n := range m.allNotas() {
 		// contagens por status respeitam a janela/filtros; imported_today e latências
@@ -210,11 +211,21 @@ func (m *Memory) Overview(_ context.Context, f OverviewFilter) (model.Overview, 
 		if n.ImportedAt != nil && n.ImportedAt.Format("2006-01-02") == today {
 			ov.ImportedToday++
 		}
-		if n.LatArrivalSyncS != nil {
-			arr = append(arr, *n.LatArrivalSyncS)
+		// Latência CENSURADA (espelha o Postgres): tempo decorrido = COALESCE(fim, now)
+		// - início, incluindo as ainda-em-espera; NULL-if-incompleto viesava p/ baixo.
+		if n.ArrivedAt != nil && (n.SyncedAt != nil || n.Status == model.StatusArrived) {
+			end := now
+			if n.SyncedAt != nil {
+				end = *n.SyncedAt
+			}
+			arr = append(arr, int64(end.Sub(*n.ArrivedAt).Seconds()))
 		}
-		if n.LatSyncImportS != nil {
-			syn = append(syn, *n.LatSyncImportS)
+		if n.SyncedAt != nil && (n.ImportedAt != nil || n.Status == model.StatusSynced || n.Status == model.StatusPendingImport) {
+			end := now
+			if n.ImportedAt != nil {
+				end = *n.ImportedAt
+			}
+			syn = append(syn, int64(end.Sub(*n.SyncedAt).Seconds()))
 		}
 	}
 	if f.windowed() {
