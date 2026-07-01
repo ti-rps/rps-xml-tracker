@@ -342,6 +342,35 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration, onResult func(
 	}
 }
 
+// EmitImportedFor re-consulta as chaves dadas no Athenas e emite observação 'imported'
+// para as que estão IMPORTADO=1 (idempotente via dedup). É o motor do `reconcile --fix`:
+// dado o conjunto que o Athenas importou mas o tracker não sabia, o tracker se autocorrige.
+// Retorna quantas observações foram aceitas (novas) e quantas chaves o Athenas confirmou.
+func (p *Poller) EmitImportedFor(ctx context.Context, chaves []string) (accepted, confirmed int, err error) {
+	if len(chaves) == 0 {
+		return 0, 0, nil
+	}
+	states, err := p.fb.Lookup(ctx, chaves)
+	if err != nil {
+		return 0, 0, err
+	}
+	now := p.now()
+	var obs []model.Observation
+	for _, c := range chaves {
+		st, ok := states[c]
+		if !ok || !st.Importado {
+			continue // o Athenas não confirma imported -> não força
+		}
+		confirmed++
+		obs = append(obs, importObs(c, model.EventImported, now, nil, st))
+	}
+	if len(obs) == 0 {
+		return 0, confirmed, nil
+	}
+	acc, _, err := p.st.AppendObservations(ctx, obs)
+	return acc, confirmed, err
+}
+
 func importObs(chave, event string, now time.Time, payload map[string]any, st firebird.ImportState) model.Observation {
 	// ObservedAt = hora real da importação no Athenas, com fallback em cascata:
 	//   1. DATAROBO  — mais preciso (hora exata do robô em lote); NULL em importações manuais

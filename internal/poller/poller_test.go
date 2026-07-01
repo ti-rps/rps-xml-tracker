@@ -13,7 +13,9 @@ import (
 )
 
 // fakeReader returns canned Firebird states (no DB) for the offline unit test.
-type fakeReader struct{ states map[string]firebird.ImportState }
+type fakeReader struct {
+	states map[string]firebird.ImportState
+}
 
 func (f fakeReader) Lookup(_ context.Context, chaves []string) (map[string]firebird.ImportState, error) {
 	out := map[string]firebird.ImportState{}
@@ -345,5 +347,36 @@ func TestPollOnce_LiveFirebird(t *testing.T) {
 	d, _, _ := st.GetNota(ctx, chave)
 	if d.Status != model.StatusImported {
 		t.Fatalf("status = %s, want imported (chave deve estar IMPORTADO=1)", d.Status)
+	}
+}
+
+func TestEmitImportedFor_ReemitsOnlyConfirmed(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	// Reconcile passou estas 3 como "faltando no tracker". O Athenas confirma 2
+	// importadas; a terceira não está importada lá -> não deve ser forçada.
+	fr := fakeReader{states: map[string]firebird.ImportState{
+		"OK1":      {Found: true, Importado: true, CodigoEmpresa: ptr(10)},
+		"OK2":      {Found: true, Importado: true, CodigoEmpresa: ptr(10)},
+		"PENDente": {Found: true, Importado: false},
+	}}
+	p := New(st, fr)
+
+	acc, confirmed, err := p.EmitImportedFor(ctx, []string{"OK1", "OK2", "PENDente", "SUMIDA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed != 2 || acc != 2 {
+		t.Fatalf("esperava confirmed=2 acc=2, veio confirmed=%d acc=%d", confirmed, acc)
+	}
+	// idempotente: reexecutar não gera novas observações.
+	acc2, _, _ := p.EmitImportedFor(ctx, []string{"OK1", "OK2"})
+	if acc2 != 0 {
+		t.Fatalf("reexecução deveria ser idempotente (acc=0), veio %d", acc2)
+	}
+	// as confirmadas viraram imported no tracker.
+	n, ok, _ := st.GetNota(ctx, "OK1")
+	if !ok || n.Status != model.StatusImported {
+		t.Fatalf("OK1 deveria estar imported, está ok=%v status=%q", ok, n.Status)
 	}
 }

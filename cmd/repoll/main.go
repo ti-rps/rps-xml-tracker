@@ -39,6 +39,16 @@ func main() {
 	// notas já gravadas, lendo o CNPJ por filial do Athenas (TABFILIAL) e comparando a
 	// raiz com o emitente/destinatário. One-off, idempotente.
 	backfillDirection := flag.Bool("backfill-direction", false, "preenche notas.direction retroativamente a partir do CNPJ das filiais (TABFILIAL)")
+	// --reconcile: auditoria de acurácia do import — cruza chave a chave o que o Athenas
+	// tem como importado contra o que o tracker tem, e lista as divergências.
+	reconcileMode := flag.Bool("reconcile", false, "audita o import: compara chaves do Athenas vs tracker e lista divergências")
+	source := flag.String("source", "chaveacesso", "fonte no Athenas: chaveacesso (TABLISTACHAVEACESSO, corretude do tracker) | entradasaida (TABENTRADASAIDA, o livro fiscal)")
+	until := flag.String("until", "", "fim da janela (YYYY-MM-DD, exclusivo); vazio = amanhã")
+	empresa := flag.Int("empresa", 0, "filtra por CODIGOEMPRESA (0 = todas)")
+	filial := flag.Int("filial", 0, "filtra por CODIGOFILIAL (0 = todas)")
+	tipo := flag.String("tipo", "", "só p/ source=entradasaida: E (entrada) | S (saida) | vazio (ambos)")
+	fix := flag.Bool("fix", false, "reconcile: além de reportar, emite as observações 'imported' que faltam (autocorreção)")
+	limit := flag.Int("limit", 30, "reconcile: máximo de chaves listadas por seção no relatório (0 = todas)")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -63,6 +73,15 @@ func main() {
 		log.Fatalf("postgres: %v", err)
 	}
 	defer pg.Close()
+
+	if *reconcileMode {
+		runReconcile(ctx, rd, pg, reconcileOpts{
+			source: *source, since: *since, until: *until,
+			empresa: optInt(*empresa), filial: optInt(*filial), tipo: *tipo,
+			fix: *fix, limit: *limit,
+		})
+		return
+	}
 
 	if *fixImportedAt {
 		from := time.Now().AddDate(0, 0, -30)
