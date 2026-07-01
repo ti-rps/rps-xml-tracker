@@ -819,6 +819,70 @@ func (p *Postgres) BackfillDirection(ctx context.Context, filiais []FilialCNPJ, 
 	return total, nil
 }
 
+// StatusForChaves retorna o status derivado atual de cada chave dada (as ausentes na
+// notas simplesmente não aparecem no mapa). Chunka o IN para não estourar parâmetros.
+// Usado pelo reconcile para rotular por que uma chave "faltou" (arrived/synced/...).
+func (p *Postgres) StatusForChaves(ctx context.Context, chaves []string) (map[string]model.NotaStatus, error) {
+	out := make(map[string]model.NotaStatus, len(chaves))
+	const chunk = 1000
+	for start := 0; start < len(chaves); start += chunk {
+		end := start + chunk
+		if end > len(chaves) {
+			end = len(chaves)
+		}
+		rows, err := p.pool.Query(ctx,
+			`SELECT chave_acesso, status FROM notas WHERE chave_acesso = ANY($1)`, chaves[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var c string
+			var s model.NotaStatus
+			if err := rows.Scan(&c, &s); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[c] = s
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
+// ImportedChavesBetween retorna as chaves com status=imported cujo imported_at cai na
+// janela [since, until), opcionalmente de uma empresa. É o lado "tracker" do reconcile
+// por TABLISTACHAVEACESSO (mesma janela de DATAINCLUSAO no Athenas).
+func (p *Postgres) ImportedChavesBetween(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) ([]string, error) {
+	q := `SELECT chave_acesso FROM notas WHERE status='imported' AND imported_at >= $1 AND imported_at < $2`
+	args := []any{since, until}
+	if codigoEmpresa != nil {
+		args = append(args, *codigoEmpresa)
+		q += fmt.Sprintf(" AND codigo_empresa = $%d", len(args))
+	}
+	if codigoFilial != nil {
+		args = append(args, *codigoFilial)
+		q += fmt.Sprintf(" AND codigo_filial = $%d", len(args))
+	}
+	rows, err := p.pool.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // digitsPrefix retorna os primeiros n dígitos de s (ignorando não-dígitos). Usado p/
 // extrair a raiz do CNPJ da filial no backfill da direção.
 func digitsPrefix(s string, n int) string {

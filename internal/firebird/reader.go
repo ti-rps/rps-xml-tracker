@@ -198,6 +198,101 @@ func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string
 	return out, nil
 }
 
+// ImportedSince retorna as chaves IMPORTADO=1 com DATAINCLUSAO na janela [since, until),
+// opcionalmente de uma empresa. Diferente do SweepImported (que é FIRST 10000, para o
+// ticker), aqui NÃO há teto — a completude é o que importa para o reconcile; a janela +
+// empresa é que limitam o volume. Usa o índice IDX12 (DATAINCLUSAO). READ-ONLY.
+func (r *Reader) ImportedSince(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) (map[string]ImportState, error) {
+	q := `SELECT t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
+	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
+	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO, t.DATAINCLUSAO,
+	             fil.CNPJ
+	      FROM TABLISTACHAVEACESSO t
+	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
+	      LEFT JOIN TABFILIAL fil ON fil.CODIGOEMPRESA = t.CODIGOEMPRESA AND fil.CODIGO = t.CODIGOFILIAL
+	      WHERE t.IMPORTADO = 1 AND t.DATAINCLUSAO >= ? AND t.DATAINCLUSAO < ?`
+	args := []any{since, until}
+	if codigoEmpresa != nil {
+		q += ` AND t.CODIGOEMPRESA = ?`
+		args = append(args, *codigoEmpresa)
+	}
+	if codigoFilial != nil {
+		q += ` AND t.CODIGOFILIAL = ?`
+		args = append(args, *codigoFilial)
+	}
+	rows, err := r.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	rowsByChave := make(map[string][]EmpresaImport)
+	if err := scanRows(rows, rowsByChave); err != nil {
+		return nil, err
+	}
+	out := make(map[string]ImportState, len(rowsByChave))
+	for chave, rowList := range rowsByChave {
+		out[chave] = selectState(chave, rowList)
+	}
+	return out, nil
+}
+
+// Movimento é um lançamento fiscal do Athenas (TABENTRADASAIDA) — o "livro" que o painel
+// de Entradas/Saídas mostra. Chave vazia = lançamento sem XML (digitado/TXT/Excel), que o
+// tracker não tem como rastrear.
+type Movimento struct {
+	Chave         string // NFECHAVEACESSO; "" quando não veio de XML
+	CodigoEmpresa *int
+	CodigoFilial  *int
+	Tipo          string // 'E' | 'S'
+}
+
+// MovimentosByRegistro retorna os lançamentos efetivados (EFETIVADA=1) da TABENTRADASAIDA
+// com DATAREGISTRO na janela [from, until), opcionalmente por empresa e tipo (E/S). É a
+// fonte do painel de Entradas/Saídas (data de MOVIMENTO). READ-ONLY. ATENÇÃO: inclui
+// lançamentos sem XML (Chave=="") — o chamador separa os rastreáveis dos manuais.
+func (r *Reader) MovimentosByRegistro(ctx context.Context, from, until time.Time, codigoEmpresa, codigoFilial *int, tipo string) ([]Movimento, error) {
+	q := `SELECT S.NFECHAVEACESSO, S.CODIGOEMPRESA, S.CODIGOFILIAL, S.TIPO
+	      FROM TABENTRADASAIDA S
+	      WHERE S.EFETIVADA = 1 AND S.DATAREGISTRO >= ? AND S.DATAREGISTRO < ?`
+	args := []any{from, until}
+	if codigoEmpresa != nil {
+		q += ` AND S.CODIGOEMPRESA = ?`
+		args = append(args, *codigoEmpresa)
+	}
+	if codigoFilial != nil {
+		q += ` AND S.CODIGOFILIAL = ?`
+		args = append(args, *codigoFilial)
+	}
+	if tipo != "" {
+		q += ` AND S.TIPO = ?`
+		args = append(args, tipo)
+	}
+	rows, err := r.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Movimento
+	for rows.Next() {
+		var chave, t sql.NullString
+		var ce, cf sql.NullInt64
+		if err := rows.Scan(&chave, &ce, &cf, &t); err != nil {
+			return nil, err
+		}
+		m := Movimento{Chave: strings.TrimSpace(trimNull(chave)), Tipo: trimNull(t)}
+		if ce.Valid {
+			v := int(ce.Int64)
+			m.CodigoEmpresa = &v
+		}
+		if cf.Valid {
+			v := int(cf.Int64)
+			m.CodigoFilial = &v
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // Filial é uma filial cadastrada no Athenas (TABFILIAL): a chave composta
 // (CODIGOEMPRESA, CODIGO) e o CNPJ do estabelecimento.
 type Filial struct {
