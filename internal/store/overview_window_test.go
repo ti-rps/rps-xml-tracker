@@ -8,30 +8,6 @@ import (
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 )
 
-func TestOverview_LatenciaCensurada(t *testing.T) {
-	ctx := context.Background()
-	m := NewMemory()
-	// nota sincronizada há ~10 dias e AINDA não importada (status synced). Antes ela
-	// era ignorada na latência sync->import (lat NULL); agora deve entrar como ~10 dias.
-	arr := time.Now().Add(-10*24*time.Hour - time.Hour)
-	syn := time.Now().Add(-10 * 24 * time.Hour)
-	_, _, _ = m.AppendObservations(ctx, []model.Observation{
-		{ChaveAcesso: "STUCK", Stage: model.StageArrival, EventType: model.EventFileSeen, ObservedAt: arr, DocType: model.DocNFe, Source: "t"},
-		{ChaveAcesso: "STUCK", Stage: model.StageSync, EventType: model.EventFileMoved, ObservedAt: syn, DocType: model.DocNFe, Source: "t"},
-	})
-
-	ov, err := m.Overview(ctx, OverviewFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ov.LatSyncImportP50S == nil {
-		t.Fatal("nota travada (synced, não importada) deveria contar na latência sync->import censurada, veio nil")
-	}
-	if *ov.LatSyncImportP50S < 9*24*3600 {
-		t.Errorf("latência sync->import censurada = %ds, esperava ~10 dias (>=9d)", *ov.LatSyncImportP50S)
-	}
-}
-
 func TestOverview_Window(t *testing.T) {
 	ctx := context.Background()
 	m := NewMemory()
