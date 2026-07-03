@@ -24,6 +24,11 @@
 //	TRACKER_AGENT_SPOOL      default <dir do exe>\agent-spool
 //	TRACKER_AGENT_SCAN_INTERVAL  intervalo da varredura de CHEGADA, default "60s"
 //	TRACKER_AGENT_SYNC_INTERVAL  intervalo da varredura do SINCRONIZADO, default "1h"
+//	TRACKER_AGENT_SYNC_FULL_EVERY  a cada quanto tempo a varredura do SINCRONIZADO é
+//	                         COMPLETA (default "24h"). Entre completas, a varredura
+//	                         PODA as partições AAAAMM intocadas (pelo mtime do
+//	                         diretório): cai de ~21M arquivos para só as partições
+//	                         que receberam arquivo. "0" desliga a poda.
 //	TRACKER_AGENT_BACKFILL   "true" para processar o backlog (default false)
 package main
 
@@ -81,16 +86,18 @@ func (p *program) Start(service.Service) error {
 				log.Printf("scan[%s] primeira execução: cutoff de backlog gravado — arquivos anteriores ignorados; emitindo apenas novos a partir de agora", group)
 				fallthrough
 			default:
-				if r.New > 0 {
-					log.Printf("scan[%s]: escaneados=%d novos=%d emitidos=%d sem_chave=%d",
-						group, r.Scanned, r.New, r.Emitted, r.SkippedNoChave)
+				if r.New > 0 || r.PrunedDirs > 0 {
+					log.Printf("scan[%s]: escaneados=%d novos=%d emitidos=%d sem_chave=%d podadas=%d completa=%v",
+						group, r.Scanned, r.New, r.Emitted, r.SkippedNoChave, r.PrunedDirs, r.FullScan)
 				}
 				postHeartbeat(p.ctx, p.apiURL, p.secret, p.name, map[string]any{
-					"scan_type":  group,
-					"escaneados": r.Scanned,
-					"novos":      r.New,
-					"emitidos":   r.Emitted,
-					"sem_chave":  r.SkippedNoChave,
+					"scan_type":          group,
+					"escaneados":         r.Scanned,
+					"novos":              r.New,
+					"emitidos":           r.Emitted,
+					"sem_chave":          r.SkippedNoChave,
+					"particoes_podadas":  r.PrunedDirs,
+					"varredura_completa": r.FullScan,
 				})
 			}
 		})
@@ -126,11 +133,20 @@ func (p *program) build() {
 		roots = append(roots, agent.Root{Path: sync, Stage: model.StageSync, Event: model.EventFileMoved})
 	}
 
+	// Poda por recência do SINCRONIZADO: completa a cada 24h por default; "0" desliga.
+	syncFullEvery := 24 * time.Hour
+	if v := os.Getenv("TRACKER_AGENT_SYNC_FULL_EVERY"); v != "" {
+		if d, e := time.ParseDuration(v); e == nil {
+			syncFullEvery = d
+		}
+	}
+
 	ag, err := agent.New(agent.Config{
-		Name:      name,
-		Roots:     roots,
-		StatePath: getenv("TRACKER_AGENT_STATE", filepath.Join(base, "agent-state.db")),
-		Backfill:  os.Getenv("TRACKER_AGENT_BACKFILL") == "true",
+		Name:          name,
+		Roots:         roots,
+		StatePath:     getenv("TRACKER_AGENT_STATE", filepath.Join(base, "agent-state.db")),
+		Backfill:      os.Getenv("TRACKER_AGENT_BACKFILL") == "true",
+		SyncFullEvery: syncFullEvery,
 	}, client)
 	if err != nil {
 		log.Fatalf("agent: %v", err)
