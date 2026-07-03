@@ -47,6 +47,17 @@ type Config struct {
 	BatchSize int           // observations per submit (default 500)
 	StableAge time.Duration // a file must be older than this before parsing (default 5s)
 	Backfill  bool          // false: first scan seeds backlog without emitting
+	// SyncFullEvery ativa a PODA POR RECÊNCIA na varredura do SINCRONIZADO: as
+	// varreduras entre completas PULAM as partições AAAAMM cujo mtime de diretório é
+	// anterior ao início da última varredura bem-sucedida (no NTFS, criar/mover um
+	// arquivo dentro de uma pasta atualiza o mtime DELA — partição intocada = nada
+	// novo dentro). Isso derruba a passada de O(21M arquivos) para O(diretórios +
+	// arquivos das partições quentes), sem perder notas antigas sincronizadas hoje
+	// (a partição AAAAMM é por mês de EMISSÃO; quando uma nota velha sincroniza, o
+	// mtime da partição antiga é atualizado e ela é visitada). Uma varredura COMPLETA
+	// roda a cada SyncFullEvery como rede de segurança. 0 = poda desligada (toda
+	// varredura é completa — comportamento antigo).
+	SyncFullEvery time.Duration
 }
 
 // submitter is the ingest capability (interface for tests).
@@ -121,12 +132,17 @@ type Result struct {
 	Emitted        int
 	SkippedNoChave int
 	Seeded         bool
+	PrunedDirs     int  // partições AAAAMM puladas por estarem intocadas (poda por recência)
+	FullScan       bool // true quando a varredura foi completa (sem poda)
 }
 
 const (
 	flushSeenEvery     = 2000             // grava o estado bbolt em lotes (não 1 transação/arquivo)
 	progressEvery      = 5000             // loga progresso a cada N arquivos escaneados
 	spoolFlushInterval = 90 * time.Second // reenvia o spool no próprio ticker (não só no início da varredura)
+	// pruneSafetyMargin é subtraído do cutoff da poda p/ absorver jitter de relógio
+	// entre o processo e os timestamps do filesystem (mesma máquina — folga generosa).
+	pruneSafetyMargin = 2 * time.Minute
 )
 
 // ScanOnce flushes any spooled batches, then scans ALL roots once (arrival+sync
@@ -134,12 +150,16 @@ const (
 // usa RunSplit, que escaneia chegada e sync em loops independentes (a varredura
 // gigante do sync não pode atrasar a detecção da chegada).
 func (a *Agent) ScanOnce(ctx context.Context) (Result, error) {
-	return a.scanRoots(ctx, "all", a.cfg.Roots)
+	return a.scanRoots(ctx, "all", a.cfg.Roots, nil)
 }
 
 // scanRoots flushes any spooled batches, then walks the given roots once.
-func (a *Agent) scanRoots(ctx context.Context, label string, roots []Root) (Result, error) {
+// pruneCutoff != nil ativa a poda por recência: partições AAAAMM com mtime de
+// diretório anterior ao cutoff são puladas inteiras (nada foi criado/movido nelas
+// desde a última varredura — ver Config.SyncFullEvery).
+func (a *Agent) scanRoots(ctx context.Context, label string, roots []Root, pruneCutoff *time.Time) (Result, error) {
 	var res Result
+	res.FullScan = pruneCutoff == nil
 	a.flushSpoolSafe(ctx) // non-fatal: spool retries next cycle
 
 	// Seeding by cutoff timestamp: on the very first run (no cutoff stored yet,
@@ -206,7 +226,19 @@ func (a *Agent) scanRoots(ctx context.Context, label string, roots []Root) (Resu
 			if err != nil {
 				return nil // skip unreadable entries
 			}
-			if d.IsDir() || !strings.EqualFold(filepath.Ext(path), ".xml") {
+			if d.IsDir() {
+				// Poda por recência: partição AAAAMM intocada desde o cutoff -> pula a
+				// subárvore. Só em diretórios-partição (nome AAAAMM), nunca na raiz;
+				// qualquer outro nível é sempre descido (a poda é conservadora).
+				if pruneCutoff != nil && path != root.Path && isPartitionDir(d.Name()) {
+					if info, ierr := d.Info(); ierr == nil && info.ModTime().Before(*pruneCutoff) {
+						res.PrunedDirs++
+						return filepath.SkipDir
+					}
+				}
+				return nil
+			}
+			if !strings.EqualFold(filepath.Ext(path), ".xml") {
 				return nil
 			}
 			if ctx.Err() != nil {
@@ -370,14 +402,18 @@ func (a *Agent) alreadySeen(path string, info fs.FileInfo) bool {
 	return seen
 }
 
-var seedCutoffKey = []byte("seed_cutoff_unixnano")
+var (
+	seedCutoffKey   = []byte("seed_cutoff_unixnano")
+	syncLastScanKey = []byte("sync_last_scan_start_unixnano") // início da última varredura de sync BEM-SUCEDIDA (podada ou completa)
+	syncLastFullKey = []byte("sync_last_full_start_unixnano") // início da última varredura de sync COMPLETA bem-sucedida
+)
 
-// seedCutoff returns the persisted backlog cutoff and whether one was stored.
-func (a *Agent) seedCutoff() (time.Time, bool) {
+// getMetaTime lê um timestamp persistido do bucket meta.
+func (a *Agent) getMetaTime(key []byte) (time.Time, bool) {
 	var t time.Time
 	var ok bool
 	_ = a.db.View(func(tx *bolt.Tx) error {
-		v := tx.Bucket(metaBucket).Get(seedCutoffKey)
+		v := tx.Bucket(metaBucket).Get(key)
 		if v == nil {
 			return nil
 		}
@@ -389,11 +425,77 @@ func (a *Agent) seedCutoff() (time.Time, bool) {
 	return t, ok
 }
 
-// setSeedCutoff persists the backlog cutoff so the seed survives a restart.
-func (a *Agent) setSeedCutoff(t time.Time) error {
+// setMetaTime persiste um timestamp no bucket meta.
+func (a *Agent) setMetaTime(key []byte, t time.Time) error {
 	return a.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(metaBucket).Put(seedCutoffKey, []byte(strconv.FormatInt(t.UnixNano(), 10)))
+		return tx.Bucket(metaBucket).Put(key, []byte(strconv.FormatInt(t.UnixNano(), 10)))
 	})
+}
+
+// seedCutoff returns the persisted backlog cutoff and whether one was stored.
+func (a *Agent) seedCutoff() (time.Time, bool) { return a.getMetaTime(seedCutoffKey) }
+
+// setSeedCutoff persists the backlog cutoff so the seed survives a restart.
+func (a *Agent) setSeedCutoff(t time.Time) error { return a.setMetaTime(seedCutoffKey, t) }
+
+// isPartitionDir reports whether name looks like an AAAAMM partition folder
+// (ex.: 202606) — o nível folha do SINCRONIZADO que contém os XMLs diretamente.
+// Exige mês 01..12; qualquer outro nome é descido normalmente (poda conservadora).
+func isPartitionDir(name string) bool {
+	if len(name) != 6 {
+		return false
+	}
+	for i := 0; i < 6; i++ {
+		if name[i] < '0' || name[i] > '9' {
+			return false
+		}
+	}
+	mm := int(name[4]-'0')*10 + int(name[5]-'0')
+	return mm >= 1 && mm <= 12
+}
+
+// syncPruneCutoff decide o modo da PRÓXIMA varredura do sync: retorna o cutoff da
+// poda, ou nil quando a varredura deve ser COMPLETA (poda desligada, nenhuma completa
+// registrada ainda, ou a última completa mais velha que SyncFullEvery). A corretude é
+// indutiva: uma partição só é podada se intocada desde o início da última varredura
+// bem-sucedida — que por sua vez cobriu tudo que suas antecessoras não podaram,
+// ancorado numa varredura completa.
+func (a *Agent) syncPruneCutoff() *time.Time {
+	if a.cfg.SyncFullEvery <= 0 {
+		return nil
+	}
+	lastFull, ok := a.getMetaTime(syncLastFullKey)
+	if !ok || a.now().Sub(lastFull) >= a.cfg.SyncFullEvery {
+		return nil
+	}
+	lastScan, ok := a.getMetaTime(syncLastScanKey)
+	if !ok {
+		return nil
+	}
+	c := lastScan.Add(-pruneSafetyMargin)
+	return &c
+}
+
+// scanSync roda uma varredura do grupo sync (podada ou completa conforme
+// syncPruneCutoff) e, SÓ em caso de sucesso, registra o início desta varredura como
+// referência da próxima poda (arquivos criados durante a varredura têm mtime >= start
+// e serão revisitados; varredura interrompida não registra nada — a próxima recobre).
+func (a *Agent) scanSync(ctx context.Context, roots []Root) (Result, error) {
+	start := a.now()
+	cutoff := a.syncPruneCutoff()
+	res, err := a.scanRoots(ctx, "sync", roots, cutoff)
+	if err != nil {
+		return res, err
+	}
+	if e := a.setMetaTime(syncLastScanKey, start); e != nil {
+		return res, e
+	}
+	if cutoff == nil {
+		if e := a.setMetaTime(syncLastFullKey, start); e != nil {
+			return res, e
+		}
+	}
+	return res, nil
 }
 
 // Run loops ScanOnce every interval until ctx is cancelled.
@@ -430,12 +532,12 @@ func (a *Agent) RunSplit(ctx context.Context, arrivalInterval, syncInterval time
 		}
 	}
 
-	loop := func(wg *sync.WaitGroup, label string, roots []Root, interval time.Duration) {
+	loop := func(wg *sync.WaitGroup, label string, scan func(context.Context) (Result, error), interval time.Duration) {
 		defer wg.Done()
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
-			res, err := a.scanRoots(ctx, label, roots)
+			res, err := scan(ctx)
 			if onResult != nil {
 				onResult(label, res, err)
 			}
@@ -450,11 +552,15 @@ func (a *Agent) RunSplit(ctx context.Context, arrivalInterval, syncInterval time
 	var wg sync.WaitGroup
 	if len(arrivalRoots) > 0 {
 		wg.Add(1)
-		go loop(&wg, "chegada", arrivalRoots, arrivalInterval)
+		go loop(&wg, "chegada", func(c context.Context) (Result, error) {
+			return a.scanRoots(c, "chegada", arrivalRoots, nil) // chegada é fila pequena: sempre completa
+		}, arrivalInterval)
 	}
 	if len(syncRoots) > 0 {
 		wg.Add(1)
-		go loop(&wg, "sync", syncRoots, syncInterval)
+		go loop(&wg, "sync", func(c context.Context) (Result, error) {
+			return a.scanSync(c, syncRoots) // podada por recência; completa a cada SyncFullEvery
+		}, syncInterval)
 	}
 
 	// Flush do spool no PRÓPRIO ticker (e já na partida): com as varreduras longas, os

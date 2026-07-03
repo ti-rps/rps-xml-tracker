@@ -260,7 +260,7 @@ func TestScanRoots_SubsetByStage(t *testing.T) {
 	t.Cleanup(func() { a.Close() })
 
 	// só o root de chegada -> 1 obs de chegada
-	if _, err := a.scanRoots(context.Background(), "chegada", []Root{a.cfg.Roots[0]}); err != nil {
+	if _, err := a.scanRoots(context.Background(), "chegada", []Root{a.cfg.Roots[0]}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sink.got) != 1 || sink.got[0].Stage != model.StageArrival {
@@ -268,7 +268,7 @@ func TestScanRoots_SubsetByStage(t *testing.T) {
 	}
 
 	// só o root de sync -> +1 obs de sync (a de chegada não é re-varrida aqui)
-	if _, err := a.scanRoots(context.Background(), "sync", []Root{a.cfg.Roots[1]}); err != nil {
+	if _, err := a.scanRoots(context.Background(), "sync", []Root{a.cfg.Roots[1]}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(sink.got) != 2 || sink.got[1].Stage != model.StageSync {
