@@ -78,8 +78,9 @@ func TestOverviewAndEmpresas(t *testing.T) {
 	if ov.ImportedToday != 1 {
 		t.Errorf("imported_today=%d want 1", ov.ImportedToday)
 	}
-	if ov.LatArrivalSyncP50S == nil || *ov.LatArrivalSyncP50S != 1800 {
-		t.Errorf("lat arrival->sync p50 = %v want 1800", ov.LatArrivalSyncP50S)
+	// Latências (p50/p95) foram removidas do overview (nil) — ver Postgres.Overview.
+	if ov.LatArrivalSyncP50S != nil || ov.LatSyncImportP50S != nil {
+		t.Errorf("latências deveriam ser nil (removidas do overview), veio %v/%v", ov.LatArrivalSyncP50S, ov.LatSyncImportP50S)
 	}
 
 	emps, total, err := m.Empresas(ctx, EmpresaFilter{PendentesOnly: true})

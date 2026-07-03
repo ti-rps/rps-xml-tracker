@@ -496,36 +496,17 @@ func (p *Postgres) Overview(ctx context.Context, f OverviewFilter) (model.Overvi
 		return ov, err
 	}
 
-	// Percentis sobre uma JANELA MÓVEL (últimos 30 dias) do campo de início de
-	// cada métrica. Isso exclui o backfill histórico, cujo arrived_at é o ModTime
-	// antigo do arquivo (não uma transição chegada->sync real) e inflava o p50/p95.
-	//
-	// percentile_cont é ordered-set agg e não aceita FILTER, então cada um é uma
-	// subquery com seu próprio recorte (arrived_at p/ chegada->sync, synced_at p/
-	// sync->import). Janela tunável via latencyWindow.
-	//
-	// Mede só as transições CONCLUÍDAS (lat_*_s é NULL enquanto não completa;
-	// percentile_cont ignora NULL). É DE PROPÓSITO: censurar (incluir os pendentes com
-	// COALESCE(fim, now())-início) exigia ordenar os ~2M pendentes no percentil e levava
-	// ~4min -> o /metrics/overview estourava o timeout e o painel ficava vazio. A "espera
-	// real / backlog travado" é mostrada, barata (contagem por faixa), pelo GET
-	// /metrics/aging — é lá que o stuck aparece, não neste card.
-	var a50, a95, s50, s95 *float64
-	if err := p.pool.QueryRow(ctx, `SELECT
-		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s)
-		   FROM notas WHERE arrived_at >= now() - $1::interval),
-		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s)
-		   FROM notas WHERE arrived_at >= now() - $1::interval),
-		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_sync_import_s)
-		   FROM notas WHERE synced_at  >= now() - $1::interval),
-		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_sync_import_s)
-		   FROM notas WHERE synced_at  >= now() - $1::interval)`,
-		latencyWindow).Scan(&a50, &a95, &s50, &s95); err != nil {
-		return ov, err
-	}
+	// Latências (p50/p95) foram REMOVIDAS deste card. Nesta base o percentile_cont não é
+	// computável de forma barata E confiável: quase tudo foi sincronizado nos últimos 30d
+	// (backfill), então a janela casa dezenas de milhões e o percentil ordena tudo (medido:
+	// 3m49s censurado, 5m36s só-concluídas, >180s timeout -> o /metrics/overview estourava
+	// e o painel ficava VAZIO); amostrar (LIMIT) também não resolveu porque o sync->import
+	// fica majoritariamente NEGATIVO (imported_at < synced_at: o Athenas importou antes de
+	// o agente observar o sync, típico do backfill). A "espera real / backlog travado" é
+	// mostrada, rápida e honesta, pelo GET /metrics/aging (contagem por faixa). Os campos
+	// Lat*P50/P95S ficam nil (omitempty). Reintroduzir depois barato (agregado mantido, ou
+	// pós-backfill excluindo lat<0).
 	ov.InTransit = ov.Arrived + ov.Synced
-	ov.LatArrivalSyncP50S, ov.LatArrivalSyncP95S = f2i(a50), f2i(a95)
-	ov.LatSyncImportP50S, ov.LatSyncImportP95S = f2i(s50), f2i(s95)
 	return ov, nil
 }
 
