@@ -215,34 +215,21 @@ func (m *Memory) Overview(_ context.Context, f OverviewFilter) (model.Overview, 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var ov model.Overview
-	now := time.Now()
-	today := now.Format("2006-01-02")
-	var arr, syn []int64
+	today := time.Now().Format("2006-01-02")
 	for _, n := range m.allNotas() {
-		// contagens por status respeitam a janela/filtros; imported_today e latências
-		// seguem globais (paridade com o Postgres).
+		// contagens por status respeitam a janela/filtros; imported_today segue global.
 		if overviewMatches(n, f) {
 			addStatus(&ov.StatusCounts, n.Status)
 		}
 		if n.ImportedAt != nil && n.ImportedAt.Format("2006-01-02") == today {
 			ov.ImportedToday++
 		}
-		// Só transições concluídas (espelha o Postgres): censurar os pendentes no percentil
-		// era caro demais no card (~4min sobre 2M) e derrubava o overview. O backlog travado
-		// é mostrado pelo Aging (contagem por faixa).
-		if n.LatArrivalSyncS != nil {
-			arr = append(arr, *n.LatArrivalSyncS)
-		}
-		if n.LatSyncImportS != nil {
-			syn = append(syn, *n.LatSyncImportS)
-		}
 	}
 	if f.windowed() {
 		ov.Mode = "flow"
 	}
 	ov.InTransit = ov.Arrived + ov.Synced
-	ov.LatArrivalSyncP50S, ov.LatArrivalSyncP95S = pctl(arr, 0.50), pctl(arr, 0.95)
-	ov.LatSyncImportP50S, ov.LatSyncImportP95S = pctl(syn, 0.50), pctl(syn, 0.95)
+	// Latências (p50/p95) removidas do overview — ver Postgres.Overview. Ficam nil.
 	return ov, nil
 }
 
