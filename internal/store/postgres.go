@@ -496,40 +496,17 @@ func (p *Postgres) Overview(ctx context.Context, f OverviewFilter) (model.Overvi
 		return ov, err
 	}
 
-	// Percentis sobre uma JANELA MÓVEL (últimos 30 dias) do campo de início de
-	// cada métrica. Isso exclui o backfill histórico, cujo arrived_at é o ModTime
-	// antigo do arquivo (não uma transição chegada->sync real) e inflava o p50/p95.
-	//
-	// Latência CENSURADA: em vez de lat_*_s (que é NULL enquanto a transição não
-	// completa -> percentile_cont ignora NULL -> viés de sobrevivência, mostrava só os
-	// rápidos que passaram e escondia os travados há semanas), usamos o tempo DECORRIDO
-	// = COALESCE(fim, now()) - início. Assim uma nota parada há 13 dias entra com "13d"
-	// e o p95 reflete a fila real. Incluímos as ainda-em-espera (status compatível) e
-	// excluímos as terminais que nunca vão completar aquela transição (ex.: import_ignored
-	// não conta na sync->import). percentile_cont é ordered-set agg (sem FILTER), então
-	// cada percentil é uma subquery. Janela tunável via latencyWindow.
-	const arrDur = "EXTRACT(epoch FROM COALESCE(synced_at, now()) - arrived_at)"
-	const synDur = "EXTRACT(epoch FROM COALESCE(imported_at, now()) - synced_at)"
-	var a50, a95, s50, s95 *float64
-	if err := p.pool.QueryRow(ctx, `SELECT
-		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY `+arrDur+`)
-		   FROM notas WHERE arrived_at >= now() - $1::interval
-		     AND (synced_at IS NOT NULL OR status = 'arrived'::nota_status)),
-		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY `+arrDur+`)
-		   FROM notas WHERE arrived_at >= now() - $1::interval
-		     AND (synced_at IS NOT NULL OR status = 'arrived'::nota_status)),
-		(SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY `+synDur+`)
-		   FROM notas WHERE synced_at  >= now() - $1::interval
-		     AND (imported_at IS NOT NULL OR status IN ('synced','pending_import'))),
-		(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY `+synDur+`)
-		   FROM notas WHERE synced_at  >= now() - $1::interval
-		     AND (imported_at IS NOT NULL OR status IN ('synced','pending_import')))`,
-		latencyWindow).Scan(&a50, &a95, &s50, &s95); err != nil {
-		return ov, err
-	}
+	// Latências (p50/p95) foram REMOVIDAS deste card por ora. Motivo: nesta base o
+	// percentile_cont não é computável de forma barata E confiável — praticamente tudo
+	// foi sincronizado nos últimos 30d (backfill), então a janela casa dezenas de milhões
+	// e o percentil ordena tudo (~2-5min -> o overview estourava o timeout e o painel
+	// ficava vazio); e o sync->import fica majoritariamente NEGATIVO (o Athenas registrou
+	// a importação antes de o agente observar o sync — imported_at < synced_at), poluindo
+	// a métrica. A "espera real / backlog travado" é mostrada, rápida e honesta, pelo
+	// GET /metrics/aging (contagem por faixa de idade). Reintroduzir p50/p95 depois, de
+	// forma barata (agregado mantido, ou quando o backfill sair da janela e excluindo lat<0).
+	// Os campos Lat*P50/P95S ficam nil (omitempty) -> o front não mostra o card.
 	ov.InTransit = ov.Arrived + ov.Synced
-	ov.LatArrivalSyncP50S, ov.LatArrivalSyncP95S = f2i(a50), f2i(a95)
-	ov.LatSyncImportP50S, ov.LatSyncImportP95S = f2i(s50), f2i(s95)
 	return ov, nil
 }
 
