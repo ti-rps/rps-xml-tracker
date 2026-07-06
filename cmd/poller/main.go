@@ -54,6 +54,22 @@ func main() {
 			log.Fatalf("postgres: %v", err)
 		}
 		defer pg.Close()
+		// Prioridade da rotação: fatia do lote reservada às notas com synced_at
+		// recente (detecta import/ignore em 1-2 ciclos). Defaults 48h/0.7;
+		// TRACKER_POLL_HOT_WINDOW=0 desliga (LRU puro, comportamento antigo).
+		hotWindow := 48 * time.Hour
+		if v := os.Getenv("TRACKER_POLL_HOT_WINDOW"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				hotWindow = d
+			}
+		}
+		hotFraction := 0.7
+		if v := os.Getenv("TRACKER_POLL_HOT_FRACTION"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				hotFraction = f
+			}
+		}
+		pg.SetPollPriority(hotWindow, hotFraction)
 		st = pg
 	default:
 		log.Fatal("TRACKER_STORE inválido")
@@ -145,11 +161,15 @@ func main() {
 				return
 			}
 			if r.Emitted > 0 {
-				log.Printf("sweep: encontradas=%d emitidas=%d dedup=%d", r.Found, r.Emitted, r.Skipped)
+				log.Printf("sweep: encontradas=%d importadas=%d ignoradas=%d pendentes=%d emitidas=%d dedup=%d",
+					r.Found, r.Imported, r.Ignored, r.Pending, r.Emitted, r.Skipped)
 			}
 			hbMu.Lock()
 			delete(hbPayload, "sweep_error")
 			hbPayload["sweep_found"] = r.Found
+			hbPayload["sweep_imported"] = r.Imported
+			hbPayload["sweep_ignored"] = r.Ignored
+			hbPayload["sweep_pending"] = r.Pending
 			hbPayload["sweep_emitted"] = r.Emitted
 			hbPayload["sweep_skipped"] = r.Skipped
 			pay := copyPayload()

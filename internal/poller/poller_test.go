@@ -27,11 +27,13 @@ func (f fakeReader) Lookup(_ context.Context, chaves []string) (map[string]fireb
 	return out, nil
 }
 
-// SweepImported retorna todas as entradas importadas (ignora `since` — é um fake).
-func (f fakeReader) SweepImported(_ context.Context, _ time.Time) (map[string]firebird.ImportState, error) {
+// SweepRecent retorna as entradas com linha terminal (ignora `since` — é um fake).
+// Como no reader real, uma candidata a ignorada sai daqui SEM as linhas pendentes
+// (recorte terminal); a visão completa vem do Lookup.
+func (f fakeReader) SweepRecent(_ context.Context, _ time.Time) (map[string]firebird.ImportState, error) {
 	out := map[string]firebird.ImportState{}
 	for k, v := range f.states {
-		if v.Importado {
+		if v.Importado || v.ImportIgnorada {
 			out[k] = v
 		}
 	}
@@ -378,5 +380,80 @@ func TestEmitImportedFor_ReemitsOnlyConfirmed(t *testing.T) {
 	n, ok, _ := st.GetNota(ctx, "OK1")
 	if !ok || n.Status != model.StatusImported {
 		t.Fatalf("OK1 deveria estar imported, está ok=%v status=%q", ok, n.Status)
+	}
+}
+
+// splitReader modela a diferença crucial do sweep: SweepRecent devolve o RECORTE
+// TERMINAL (a linha importada/ignorada que casou o filtro), enquanto Lookup devolve a
+// resolução COMPLETA da chave (selectState sobre todas as linhas por empresa).
+type splitReader struct {
+	sweep  map[string]firebird.ImportState
+	lookup map[string]firebird.ImportState
+}
+
+func (s splitReader) SweepRecent(_ context.Context, _ time.Time) (map[string]firebird.ImportState, error) {
+	return s.sweep, nil
+}
+
+func (s splitReader) Lookup(_ context.Context, chaves []string) (map[string]firebird.ImportState, error) {
+	out := map[string]firebird.ImportState{}
+	for _, c := range chaves {
+		if st, ok := s.lookup[c]; ok {
+			out[c] = st
+		}
+	}
+	return out, nil
+}
+
+// TestSweepOnce_IgnoradasReResolvidasComLookup cobre o P0.2: o sweep agora enxerga
+// ignoradas, mas uma candidata só vira terminal após o Lookup completo confirmar —
+// nunca pelo recorte terminal do sweep (bug histórico CLW/ROSEMBERG).
+func TestSweepOnce_IgnoradasReResolvidasComLookup(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	for _, c := range []string{"IMP", "IGN_REAL", "IGN_PENDENTE", "IGN_IMPORTADA"} {
+		seedArrival(t, st, c)
+	}
+
+	fr := splitReader{
+		// o que o filtro terminal do sweep devolve:
+		sweep: map[string]firebird.ImportState{
+			"IMP":           {Chave: "IMP", Found: true, Importado: true},
+			"IGN_REAL":      {Chave: "IGN_REAL", Found: true, ImportIgnorada: true, Motivo: "config"},
+			"IGN_PENDENTE":  {Chave: "IGN_PENDENTE", Found: true, ImportIgnorada: true, Motivo: "de terceiros"},
+			"IGN_IMPORTADA": {Chave: "IGN_IMPORTADA", Found: true, ImportIgnorada: true},
+		},
+		// a resolução completa (todas as linhas), como o selectState real faria:
+		lookup: map[string]firebird.ImportState{
+			"IGN_REAL":      {Chave: "IGN_REAL", Found: true, ImportIgnorada: true, Motivo: "config"},
+			"IGN_PENDENTE":  {Chave: "IGN_PENDENTE", Found: true}, // dona pendente -> NÃO terminal
+			"IGN_IMPORTADA": {Chave: "IGN_IMPORTADA", Found: true, Importado: true},
+		},
+	}
+	p := New(st, fr)
+
+	res, err := p.SweepOnce(ctx, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Found != 4 || res.Imported != 2 || res.Ignored != 1 || res.Pending != 1 {
+		t.Fatalf("res=%+v, want Found=4 Imported=2 (IMP direto + IGN_IMPORTADA via lookup) Ignored=1 Pending=1", res)
+	}
+
+	check := func(chave string, want model.NotaStatus) {
+		t.Helper()
+		d, _, _ := st.GetNota(ctx, chave)
+		if d.Status != want {
+			t.Errorf("%s: status=%s, want %s", chave, d.Status, want)
+		}
+	}
+	check("IMP", model.StatusImported)
+	check("IGN_REAL", model.StatusImportIgnored)
+	check("IGN_PENDENTE", model.StatusPendingImport) // NUNCA import_ignored pelo recorte do sweep
+	check("IGN_IMPORTADA", model.StatusImported)
+
+	d, _, _ := st.GetNota(ctx, "IGN_REAL")
+	if d.MotivoIgnorado != "config" {
+		t.Errorf("IGN_REAL motivo=%q, want config", d.MotivoIgnorado)
 	}
 }

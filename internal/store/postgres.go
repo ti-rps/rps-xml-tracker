@@ -21,6 +21,12 @@ import (
 // derive.Nota) and UPSERTed into the notas table, so reads hit notas directly.
 type Postgres struct {
 	pool *pgxpool.Pool
+	// Prioridade da rotação do poller (ListInflightChaves): uma fração do lote vai
+	// para as notas QUENTES (synced_at recente — as com chance real de importar já),
+	// o resto rotaciona o backlog frio por LRU. hotWindow<=0 ou hotFraction<=0
+	// desliga (LRU puro, comportamento antigo).
+	hotWindow   time.Duration
+	hotFraction float64
 }
 
 func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
@@ -32,7 +38,18 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &Postgres{pool: pool}, nil
+	return &Postgres{pool: pool, hotWindow: 48 * time.Hour, hotFraction: 0.7}, nil
+}
+
+// SetPollPriority ajusta a priorização da rotação do poller: window define o que é
+// "quente" (synced_at nos últimos window) e fraction a fatia do lote reservada a
+// elas (0..1). window==0 ou fraction<=0 desliga a priorização (LRU puro).
+func (p *Postgres) SetPollPriority(window time.Duration, fraction float64) {
+	p.hotWindow = window
+	if fraction > 1 {
+		fraction = 1
+	}
+	p.hotFraction = fraction
 }
 
 func (p *Postgres) Close() { p.pool.Close() }
@@ -269,24 +286,59 @@ func isCompleteChave(s string) bool {
 	return true
 }
 
-// ListInflightChaves returns the LEAST-recently-polled in-flight chaves and
-// stamps them as polled now — so successive cycles rotate through ALL in-flight
-// notas instead of re-checking the same oldest batch forever (Fase 1 fix).
+// ListInflightChaves returns in-flight chaves to poll and stamps them as polled now.
+// Com priorização ativa (hotWindow/hotFraction), o lote é dividido em duas filas:
+// QUENTE = synced_at recente (chance real de importar/ignorar agora — detecta a
+// transição em 1-2 ciclos em vez de esperar a rotação dos ~2M) e FRIA = o resto do
+// backlog, por LRU (garante que TUDO continua sendo revisitado — nada morre de fome:
+// a fatia fria é fixa por ciclo). Cota quente não usada transborda pra fria.
+// Sem priorização, LRU puro sobre tudo (comportamento antigo).
 func (p *Postgres) ListInflightChaves(ctx context.Context, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
-	rows, err := p.pool.Query(ctx, `
+	hotQuota := int(float64(limit) * p.hotFraction)
+	if p.hotWindow <= 0 || hotQuota <= 0 {
+		return p.pickInflight(ctx, `TRUE`, limit, nil) // LRU puro
+	}
+	hot, err := p.pickInflight(ctx, `synced_at >= now() - $2::interval`, hotQuota, &p.hotWindow)
+	if err != nil {
+		return nil, err
+	}
+	cold, err := p.pickInflight(ctx, `(synced_at IS NULL OR synced_at < now() - $2::interval)`,
+		limit-len(hot), &p.hotWindow)
+	if err != nil {
+		return nil, err
+	}
+	return append(hot, cold...), nil
+}
+
+// pickInflight seleciona até limit chaves in-flight que casam cond (LRU por
+// last_polled_at) e as carimba como recém-polladas. cond usa $2 quando window!=nil.
+// FOR UPDATE SKIP LOCKED evita corrida entre pollers concorrentes. As duas chamadas
+// (quente/fria) usam condições disjuntas, então não há dupla seleção no mesmo ciclo.
+func (p *Postgres) pickInflight(ctx context.Context, cond string, limit int, window *time.Duration) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	q := fmt.Sprintf(`
 		WITH picked AS (
 		  SELECT chave_acesso FROM notas
-		  WHERE status IN ('arrived','synced','pending_import')
+		  WHERE status IN ('arrived','synced','pending_import') AND %s
 		  ORDER BY last_polled_at ASC NULLS FIRST
 		  LIMIT $1
 		  FOR UPDATE SKIP LOCKED
 		)
 		UPDATE notas n SET last_polled_at = now()
 		FROM picked WHERE n.chave_acesso = picked.chave_acesso
-		RETURNING n.chave_acesso`, limit)
+		RETURNING n.chave_acesso`, cond)
+	args := []any{limit}
+	if window != nil {
+		// interval em sintaxe do Postgres ("172800 seconds") — o String() do Go
+		// ("48h0m0s") não é um interval válido.
+		args = append(args, fmt.Sprintf("%d seconds", int64(window.Seconds())))
+	}
+	rows, err := p.pool.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
