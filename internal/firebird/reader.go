@@ -163,13 +163,19 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 	return scanRows(rows, rowsByChave)
 }
 
-// SweepImported retorna todas as chaves com IMPORTADO=1 e DATAINCLUSAO > since.
-// Usa o índice IDX12 (DATAINCLUSAO, standalone, sempre preenchido) para varrer
-// notas inseridas recentemente no Athenas que já estão importadas — O(recentes),
-// independente do tamanho do backlog in-flight. DATAROBO (só preenchido em lotes
-// de robô) é lido como metadado mas NÃO é usado no filtro porque é NULL em muitos
-// registros; o poller rotacional captura o que sobrar via ListInflightChaves.
-func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string]ImportState, error) {
+// SweepRecent retorna as chaves com linha TERMINAL (IMPORTADO=1 OU
+// IMPORTACAOIGNORADA=1) e DATAINCLUSAO > since. Usa o índice IDX12 (DATAINCLUSAO,
+// standalone, sempre preenchido) para varrer notas inseridas recentemente no Athenas
+// — O(recentes), independente do tamanho do backlog in-flight. DATAROBO (só
+// preenchido em lotes de robô) é lido como metadado mas NÃO é usado no filtro porque
+// é NULL em muitos registros; o poller rotacional captura o que sobrar via
+// ListInflightChaves.
+//
+// ATENÇÃO (chamador): o resultado vê SÓ as linhas terminais de cada chave. Para as
+// importadas isso basta (imported vence tudo no selectState); mas uma candidata a
+// IGNORADA pode ter linha PENDENTE de outra empresa (a dona) fora deste recorte —
+// o poller re-resolve essas com Lookup completo antes de emitir (ver SweepOnce).
+func (r *Reader) SweepRecent(ctx context.Context, since time.Time) (map[string]ImportState, error) {
 	// Sweep por DATAINCLUSAO (IDX12 — standalone, sempre preenchido) em vez de
 	// DATAROBO (IDX4 — só preenchido em importações via robô em lote; NULL nas demais).
 	q := `SELECT FIRST 10000
@@ -180,7 +186,7 @@ func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string
 	      FROM TABLISTACHAVEACESSO t
 	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
 	      LEFT JOIN TABFILIAL fil ON fil.CODIGOEMPRESA = t.CODIGOEMPRESA AND fil.CODIGO = t.CODIGOFILIAL
-	      WHERE t.IMPORTADO = 1
+	      WHERE (t.IMPORTADO = 1 OR t.IMPORTACAOIGNORADA = 1)
 	        AND t.DATAINCLUSAO > ?`
 	rows, err := r.db.QueryContext(ctx, q, since)
 	if err != nil {
@@ -199,7 +205,7 @@ func (r *Reader) SweepImported(ctx context.Context, since time.Time) (map[string
 }
 
 // ImportedSince retorna as chaves IMPORTADO=1 com DATAINCLUSAO na janela [since, until),
-// opcionalmente de uma empresa. Diferente do SweepImported (que é FIRST 10000, para o
+// opcionalmente de uma empresa. Diferente do SweepRecent (que é FIRST 10000, para o
 // ticker), aqui NÃO há teto — a completude é o que importa para o reconcile; a janela +
 // empresa é que limitam o volume. Usa o índice IDX12 (DATAINCLUSAO). READ-ONLY.
 func (r *Reader) ImportedSince(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) (map[string]ImportState, error) {
