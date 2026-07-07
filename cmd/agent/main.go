@@ -51,6 +51,7 @@ import (
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/ingest"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/signing"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/version"
 )
 
 const svcName = "RpsXmlTrackerAgent"
@@ -73,8 +74,8 @@ func (p *program) Start(service.Service) error {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		log.Printf("agente iniciando — chegada=%s sync=%s backfill=%v",
-			p.arrivalInterval, p.syncInterval, os.Getenv("TRACKER_AGENT_BACKFILL") == "true")
+		log.Printf("agente iniciando — build %s, chegada=%s sync=%s backfill=%v",
+			version.Commit, p.arrivalInterval, p.syncInterval, os.Getenv("TRACKER_AGENT_BACKFILL") == "true")
 		p.ag.RunSplit(p.ctx, p.arrivalInterval, p.syncInterval, func(group string, r agent.Result, err error) {
 			switch {
 			case err != nil:
@@ -179,6 +180,7 @@ func postHeartbeat(ctx context.Context, apiURL, secret, agentName string, payloa
 		return
 	}
 	payload["agent_name"] = agentName
+	payload["version"] = version.Commit // visível no GET /status — denuncia agent.exe defasado
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return
