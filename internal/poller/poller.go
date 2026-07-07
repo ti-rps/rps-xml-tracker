@@ -36,10 +36,11 @@ func toUTF8(s string) string {
 // reader is the read-only Firebird capability the poller needs (interface for tests).
 type reader interface {
 	Lookup(ctx context.Context, chaves []string) (map[string]firebird.ImportState, error)
-	// SweepRecent retorna chaves com linha terminal (IMPORTADO=1 ou IGNORADA=1) e
-	// DATAINCLUSAO > since. É O(recentes) e não depende do tamanho do backlog
-	// in-flight — complementa a rotação do Lookup.
-	SweepRecent(ctx context.Context, since time.Time) (map[string]firebird.ImportState, error)
+	// TerminalChavesSince retorna as chaves com linha terminal (IMPORTADO=1 ou
+	// IGNORADA=1) e DATAINCLUSAO >= o dia de since (piso na meia-noite — DATAINCLUSAO
+	// é date-only). É O(recentes) e não depende do tamanho do backlog in-flight —
+	// complementa a rotação do Lookup.
+	TerminalChavesSince(ctx context.Context, since time.Time) ([]string, error)
 	// ImportedSince retorna as chaves IMPORTADO=1 com DATAINCLUSAO na janela
 	// [since, until), opcionalmente por empresa/filial. É o lado Athenas do reconcile.
 	ImportedSince(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) (map[string]firebird.ImportState, error)
@@ -79,12 +80,12 @@ type Result struct {
 
 // SweepResult reports one sweep cycle's outcome.
 type SweepResult struct {
-	Found    int // chaves com linha terminal (imported/ignorada) retornadas pelo Firebird
-	Imported int // observações 'imported' montadas neste ciclo
-	Ignored  int // observações 'import_ignored' montadas (após re-resolve com Lookup)
-	Pending  int // candidatas a ignorada que resolveram p/ pendente (dona ainda vai importar)
+	Found    int // chaves com linha terminal (imported/ignorada) no(s) dia(s) da janela
+	Imported int // observações 'imported' montadas neste ciclo (só chaves novas)
+	Ignored  int // observações 'import_ignored' montadas (após resolução com Lookup)
+	Pending  int // candidatas que resolveram p/ pendente (dona ainda vai importar)
 	Emitted  int // observações accepted pelo store (novas)
-	Skipped  int // rejeitadas por dedup (o tracker já sabia)
+	Skipped  int // já conhecidas: puladas pelo pré-filtro de status + rejeitadas por dedup
 }
 
 // PollOnce runs a single cycle: in-flight chaves -> Firebird -> emit observations.
@@ -268,67 +269,72 @@ func (p *Poller) FixImportedAt(ctx context.Context, since time.Time) (FixImporte
 	return res, nil
 }
 
-// SweepOnce pergunta ao Firebird quais notas inseridas desde `since` já têm linha
-// TERMINAL (IMPORTADO=1 ou IGNORADA=1, via DATAINCLUSAO — sempre preenchido) e emite
-// as observações correspondentes. É O(inseridas_recentes) — não enumera o backlog
-// in-flight. Observações já existentes são rejeitadas por dedup (idempotente).
+// SweepOnce pergunta ao Firebird quais notas inseridas no(s) dia(s) da janela já têm
+// linha TERMINAL (IMPORTADO=1 ou IGNORADA=1, por DATAINCLUSAO — date-only, então o
+// recorte tem piso na meia-noite) e emite as observações das que o tracker ainda não
+// conhece. É O(inseridas_recentes) — não enumera o backlog in-flight.
 //
-// Importadas são emitidas direto (imported vence tudo no derive). Candidatas a
-// IGNORADA exigem cuidado: o sweep só viu as linhas terminais da chave — pode haver
-// linha PENDENTE de outra empresa (a dona) fora do recorte, e emitir import_ignored
-// cedo demais tornaria a nota terminal antes de a dona importar (o bug histórico
-// CLW/ROSEMBERG que o selectState corrige). Por isso elas são RE-RESOLVIDAS com
-// Lookup completo (todas as linhas) antes de emitir: imported/ignorada/pendente
-// conforme a resolução — a mesma do ciclo rotacional.
+// Duas fases: (1) TerminalChavesSince traz SÓ as chaves do dia (leve — como o recorte
+// revê o dia inteiro a cada ciclo, buscar as linhas completas seria dezenas de MB a
+// cada 5min); as que o tracker já tem terminais são puladas por status (Skipped).
+// (2) As NOVAS são resolvidas com Lookup completo (todas as linhas por empresa,
+// selectState) — nunca pelo recorte terminal do sweep, que pode esconder a linha
+// PENDENTE da dona e tornar a nota terminal cedo demais (o bug histórico
+// CLW/ROSEMBERG): imported/ignorada/pendente saem da resolução, a mesma do ciclo
+// rotacional. Dedup segura reemissões residuais (idempotente).
 func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, error) {
 	var res SweepResult
-	states, err := p.fb.SweepRecent(ctx, since)
+	terminal, err := p.fb.TerminalChavesSince(ctx, since)
 	if err != nil {
 		return res, err
 	}
-	res.Found = len(states)
+	res.Found = len(terminal)
 	if res.Found == 0 {
 		return res, nil
 	}
-	now := p.now()
-	var obs []model.Observation
-	var recheck []string
-	for _, st := range states {
-		switch {
-		case st.Importado:
-			obs = append(obs, importObs(st.Chave, model.EventImported, now, nil, st))
-			res.Imported++
-		case st.ImportIgnorada:
-			recheck = append(recheck, st.Chave)
+	statuses, err := p.st.StatusForChaves(ctx, terminal)
+	if err != nil {
+		return res, err
+	}
+	var fresh []string
+	for _, c := range terminal {
+		switch statuses[c] {
+		case model.StatusImported, model.StatusImportIgnored:
+			res.Skipped++ // o tracker já sabe o desfecho — nada a fazer
+		default:
+			fresh = append(fresh, c)
 		}
 	}
-	if len(recheck) > 0 {
-		full, err := p.fb.Lookup(ctx, recheck) // visão completa (todas as linhas por empresa)
-		if err != nil {
-			return res, err
+	if len(fresh) == 0 {
+		return res, nil
+	}
+	full, err := p.fb.Lookup(ctx, fresh) // visão completa (todas as linhas por empresa)
+	if err != nil {
+		return res, err
+	}
+	now := p.now()
+	var obs []model.Observation
+	for _, c := range fresh {
+		st, ok := full[c]
+		if !ok {
+			continue // sumiu entre o sweep e o lookup — a rotação recaptura
 		}
-		for _, c := range recheck {
-			st, ok := full[c]
-			if !ok {
-				continue // sumiu entre o sweep e o lookup — a rotação recaptura
+		switch {
+		case st.Importado:
+			obs = append(obs, importObs(c, model.EventImported, now, nil, st))
+			res.Imported++
+		case st.ImportIgnorada:
+			payload := map[string]any{}
+			if st.Motivo != "" {
+				payload["motivo"] = toUTF8(st.Motivo)
 			}
-			switch {
-			case st.Importado:
-				obs = append(obs, importObs(c, model.EventImported, now, nil, st))
-				res.Imported++
-			case st.ImportIgnorada:
-				payload := map[string]any{}
-				if st.Motivo != "" {
-					payload["motivo"] = toUTF8(st.Motivo)
-				}
-				obs = append(obs, importObs(c, model.EventImportIgnored, now, payload, st))
-				res.Ignored++
-			default:
-				// há linha pendente (a dona ainda vai importar) -> NÃO é terminal;
-				// registra o avistamento e segue em rotação.
-				obs = append(obs, importObs(c, model.EventSeenPending, now, nil, st))
-				res.Pending++
-			}
+			obs = append(obs, importObs(c, model.EventImportIgnored, now, payload, st))
+			res.Ignored++
+		default:
+			// há linha pendente (a dona ainda vai importar) -> NÃO é terminal;
+			// registra o avistamento e segue em rotação.
+			obs = append(obs, importObs(c, model.EventSeenPending, now, nil, st))
+			res.Pending++
 		}
 	}
 	if len(obs) == 0 {
@@ -339,7 +345,7 @@ func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, e
 		return res, err
 	}
 	res.Emitted = accepted
-	res.Skipped = rejected
+	res.Skipped += rejected
 	return res, nil
 }
 

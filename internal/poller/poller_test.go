@@ -27,14 +27,13 @@ func (f fakeReader) Lookup(_ context.Context, chaves []string) (map[string]fireb
 	return out, nil
 }
 
-// SweepRecent retorna as entradas com linha terminal (ignora `since` — é um fake).
-// Como no reader real, uma candidata a ignorada sai daqui SEM as linhas pendentes
-// (recorte terminal); a visão completa vem do Lookup.
-func (f fakeReader) SweepRecent(_ context.Context, _ time.Time) (map[string]firebird.ImportState, error) {
-	out := map[string]firebird.ImportState{}
+// TerminalChavesSince retorna as chaves com estado terminal (ignora `since` — é um
+// fake). Como no reader real, é só a lista de chaves; a visão completa vem do Lookup.
+func (f fakeReader) TerminalChavesSince(_ context.Context, _ time.Time) ([]string, error) {
+	var out []string
 	for k, v := range f.states {
 		if v.Importado || v.ImportIgnorada {
-			out[k] = v
+			out = append(out, k)
 		}
 	}
 	return out, nil
@@ -394,16 +393,17 @@ func TestEmitImportedFor_ReemitsOnlyConfirmed(t *testing.T) {
 	}
 }
 
-// splitReader modela a diferença crucial do sweep: SweepRecent devolve o RECORTE
-// TERMINAL (a linha importada/ignorada que casou o filtro), enquanto Lookup devolve a
-// resolução COMPLETA da chave (selectState sobre todas as linhas por empresa).
+// splitReader modela a diferença crucial do sweep: TerminalChavesSince devolve o
+// RECORTE TERMINAL (as chaves com linha importada/ignorada que casou o filtro),
+// enquanto Lookup devolve a resolução COMPLETA da chave (selectState sobre todas as
+// linhas por empresa) — que pode divergir (linha pendente da dona fora do recorte).
 type splitReader struct {
-	sweep  map[string]firebird.ImportState
-	lookup map[string]firebird.ImportState
+	terminal []string
+	lookup   map[string]firebird.ImportState
 }
 
-func (s splitReader) SweepRecent(_ context.Context, _ time.Time) (map[string]firebird.ImportState, error) {
-	return s.sweep, nil
+func (s splitReader) TerminalChavesSince(_ context.Context, _ time.Time) ([]string, error) {
+	return s.terminal, nil
 }
 
 func (s splitReader) Lookup(_ context.Context, chaves []string) (map[string]firebird.ImportState, error) {
@@ -437,15 +437,11 @@ func TestSweepOnce_IgnoradasReResolvidasComLookup(t *testing.T) {
 	}
 
 	fr := splitReader{
-		// o que o filtro terminal do sweep devolve:
-		sweep: map[string]firebird.ImportState{
-			"IMP":           {Chave: "IMP", Found: true, Importado: true},
-			"IGN_REAL":      {Chave: "IGN_REAL", Found: true, ImportIgnorada: true, Motivo: "config"},
-			"IGN_PENDENTE":  {Chave: "IGN_PENDENTE", Found: true, ImportIgnorada: true, Motivo: "de terceiros"},
-			"IGN_IMPORTADA": {Chave: "IGN_IMPORTADA", Found: true, ImportIgnorada: true},
-		},
+		// o que o filtro terminal do sweep devolve (chaves com ALGUMA linha terminal):
+		terminal: []string{"IMP", "IGN_REAL", "IGN_PENDENTE", "IGN_IMPORTADA"},
 		// a resolução completa (todas as linhas), como o selectState real faria:
 		lookup: map[string]firebird.ImportState{
+			"IMP":           {Chave: "IMP", Found: true, Importado: true},
 			"IGN_REAL":      {Chave: "IGN_REAL", Found: true, ImportIgnorada: true, Motivo: "config"},
 			"IGN_PENDENTE":  {Chave: "IGN_PENDENTE", Found: true}, // dona pendente -> NÃO terminal
 			"IGN_IMPORTADA": {Chave: "IGN_IMPORTADA", Found: true, Importado: true},
