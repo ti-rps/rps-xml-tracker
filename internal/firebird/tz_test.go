@@ -38,3 +38,25 @@ func TestFbLocalTime(t *testing.T) {
 		t.Errorf("instante2=%s want %s", got2.UTC(), want)
 	}
 }
+
+// TestDateFloor cobre o piso na meia-noite BRT (wall-clock UTC) usado nos recortes
+// por DATAINCLUSAO (date-only). O caso noturno importa: às 22h BRT o dia UTC já
+// virou — o piso tem que ficar no dia de BRASÍLIA, senão o recorte pula um dia.
+func TestDateFloor(t *testing.T) {
+	cases := []struct {
+		in   time.Time
+		want time.Time
+	}{
+		// 09:00 BRT (12:00Z): mesmo dia nos dois fusos
+		{time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC), time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)},
+		// 22:00 BRT de 06/07 (01:00Z de 07/07): o dia BRT ainda é 06/07
+		{time.Date(2026, 7, 7, 1, 0, 0, 0, time.UTC), time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC)},
+		// meia-noite BRT exata (03:00Z): fica no próprio dia
+		{time.Date(2026, 7, 7, 3, 0, 0, 0, time.UTC), time.Date(2026, 7, 7, 0, 0, 0, 0, time.UTC)},
+	}
+	for _, c := range cases {
+		if got := dateFloor(c.in); !got.Equal(c.want) {
+			t.Errorf("dateFloor(%v) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}

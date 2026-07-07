@@ -163,52 +163,61 @@ func (r *Reader) lookupChunk(ctx context.Context, chaves []string, rowsByChave m
 	return scanRows(rows, rowsByChave)
 }
 
-// SweepRecent retorna as chaves com linha TERMINAL (IMPORTADO=1 OU
-// IMPORTACAOIGNORADA=1) e DATAINCLUSAO > since. Usa o índice IDX12 (DATAINCLUSAO,
-// standalone, sempre preenchido) para varrer notas inseridas recentemente no Athenas
-// — O(recentes), independente do tamanho do backlog in-flight. DATAROBO (só
-// preenchido em lotes de robô) é lido como metadado mas NÃO é usado no filtro porque
-// é NULL em muitos registros; o poller rotacional captura o que sobrar via
-// ListInflightChaves.
-//
-// ATENÇÃO (chamador): o resultado vê SÓ as linhas terminais de cada chave. Para as
-// importadas isso basta (imported vence tudo no selectState); mas uma candidata a
-// IGNORADA pode ter linha PENDENTE de outra empresa (a dona) fora deste recorte —
-// o poller re-resolve essas com Lookup completo antes de emitir (ver SweepOnce).
-func (r *Reader) SweepRecent(ctx context.Context, since time.Time) (map[string]ImportState, error) {
-	// Sweep por DATAINCLUSAO (IDX12 — standalone, sempre preenchido) em vez de
-	// DATAROBO (IDX4 — só preenchido em importações via robô em lote; NULL nas demais).
-	q := `SELECT FIRST 10000
-	             t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
-	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
-	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO, t.DATAINCLUSAO,
-	             fil.CNPJ
+// dateFloor derruba um instante para a meia-noite do seu dia em Brasília, codificada
+// em UTC (wall-clock '00:00'). DATAINCLUSAO/DATAROBO deste Athenas têm granularidade
+// de DATA (hora sempre 00:00, wall-clock BRT) e o driver envia o wall-clock UTC do
+// time.Time do Go — uma janela rolante de relógio ("now-4h") nunca casa meia-noite
+// exceto de madrugada (medido em prod: sweep cego o dia todo). Todo recorte por
+// DATAINCLUSAO precisa deste piso.
+func dateFloor(t time.Time) time.Time {
+	y, m, d := t.In(brLoc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+}
+
+// TerminalChavesSince retorna as chaves (deduplicadas) com alguma linha TERMINAL
+// (IMPORTADO=1 OU IMPORTACAOIGNORADA=1) e DATAINCLUSAO >= dateFloor(since) — ou seja,
+// do(s) dia(s) que a janela toca, já que DATAINCLUSAO é date-only. Usa o índice IDX12.
+// É a fase LEVE do sweep (só a chave, 1 coluna): o chamador pré-filtra contra o
+// tracker e re-resolve as novas com Lookup (visão completa). O FIRST alto é só um
+// disjuntor de segurança — um dia tem ~30-100k inserções, nunca perto do teto.
+func (r *Reader) TerminalChavesSince(ctx context.Context, since time.Time) ([]string, error) {
+	q := `SELECT FIRST 500000 t.CHAVEACESSO
 	      FROM TABLISTACHAVEACESSO t
-	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
-	      LEFT JOIN TABFILIAL fil ON fil.CODIGOEMPRESA = t.CODIGOEMPRESA AND fil.CODIGO = t.CODIGOFILIAL
 	      WHERE (t.IMPORTADO = 1 OR t.IMPORTACAOIGNORADA = 1)
-	        AND t.DATAINCLUSAO > ?`
-	rows, err := r.db.QueryContext(ctx, q, since)
+	        AND t.DATAINCLUSAO >= ?`
+	rows, err := r.db.QueryContext(ctx, q, dateFloor(since))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	rowsByChave := make(map[string][]EmpresaImport)
-	if err := scanRows(rows, rowsByChave); err != nil {
-		return nil, err
+	seen := map[string]struct{}{}
+	var out []string
+	for rows.Next() {
+		var chave string
+		if err := rows.Scan(&chave); err != nil {
+			return nil, err
+		}
+		chave = strings.TrimSpace(chave)
+		if !validChave(chave) {
+			continue
+		}
+		if _, dup := seen[chave]; dup {
+			continue
+		}
+		seen[chave] = struct{}{}
+		out = append(out, chave)
 	}
-	out := make(map[string]ImportState, len(rowsByChave))
-	for chave, rowList := range rowsByChave {
-		out[chave] = selectState(chave, rowList)
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
-// ImportedSince retorna as chaves IMPORTADO=1 com DATAINCLUSAO na janela [since, until),
-// opcionalmente de uma empresa. Diferente do SweepRecent (que é FIRST 10000, para o
-// ticker), aqui NÃO há teto — a completude é o que importa para o reconcile; a janela +
-// empresa é que limitam o volume. Usa o índice IDX12 (DATAINCLUSAO). READ-ONLY.
+// ImportedSince retorna as chaves IMPORTADO=1 com DATAINCLUSAO na janela
+// [dateFloor(since), until) — o piso na meia-noite é obrigatório porque DATAINCLUSAO
+// é date-only (ver dateFloor); sem ele, linhas datadas do dia que a janela corta no
+// meio escapariam para sempre. Opcionalmente por empresa/filial. NÃO há teto — a
+// completude é o que importa para o reconcile; a janela + empresa é que limitam o
+// volume. Usa o índice IDX12 (DATAINCLUSAO). READ-ONLY.
 func (r *Reader) ImportedSince(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) (map[string]ImportState, error) {
+	since = dateFloor(since)
 	q := `SELECT t.CHAVEACESSO, t.IMPORTADO, t.IMPORTACAOIGNORADA, t.MOTIVOIGNORADOIMPORTACAO, t.SITUACAO,
 	             t.TIPODOCUMENTO, t.CODIGOEMPRESA, t.CODIGOFILIAL, t.CNPJEMITENTE, t.CNPJDESTINATARIO,
 	             t.EMITENTE, t.DESTINATARIO, t.DATAEMISSAO, t.VALORTOTAL, e.NOME, t.DATAROBO, t.DATAINCLUSAO,
