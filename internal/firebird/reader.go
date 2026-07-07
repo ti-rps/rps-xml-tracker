@@ -330,6 +330,20 @@ func (r *Reader) ListFiliais(ctx context.Context) ([]Filial, error) {
 	return out, rows.Err()
 }
 
+// validChave reporta se s tem a forma de uma chave de acesso NF-e/NFC-e/CT-e:
+// exatamente 44 dígitos.
+func validChave(s string) bool {
+	if len(s) != 44 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // scanRows escaneia as colunas padrão de TABLISTACHAVEACESSO (SELECT t.CHAVEACESSO,
 // t.IMPORTADO, ..., e.NOME, t.DATAROBO, t.DATAINCLUSAO) em dst.
 // Compartilhado por lookupChunk e SweepImported.
@@ -355,6 +369,13 @@ func scanRows(rows *sql.Rows, dst map[string][]EmpresaImport) error {
 			return err
 		}
 		chave = strings.TrimSpace(chave)
+		if !validChave(chave) {
+			// A TABLISTACHAVEACESSO aceita texto livre e tem linhas com chave
+			// malformada (digitada errada, >44 chars). Elas nunca casam uma chave
+			// real do tracker e estourariam o varchar(44) do Postgres na inserção
+			// (22001, derrubando o lote inteiro) — descartadas na borda.
+			continue
+		}
 		e := EmpresaImport{
 			Importado:        imp.Valid && imp.Int64 == 1,
 			ImportIgnorada:   ign.Valid && ign.Int64 == 1,

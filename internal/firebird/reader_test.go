@@ -74,3 +74,23 @@ func split(s string, sep rune) []string {
 	out = append(out, cur)
 	return out
 }
+
+func TestValidChave(t *testing.T) {
+	ok44 := "44250610567560000110550010001234561000123456"
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{ok44, true},
+		{ok44 + "7", false},                  // 45 chars (o lixo real que estourou o varchar(44))
+		{ok44[:43], false},                   // curta
+		{"", false},                          // vazia
+		{ok44[:43] + "X", false},             // não-dígito
+		{ok44[:20] + " " + ok44[21:], false}, // espaço no meio
+	}
+	for _, c := range cases {
+		if got := validChave(c.in); got != c.want {
+			t.Errorf("validChave(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
