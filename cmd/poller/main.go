@@ -28,9 +28,11 @@ import (
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/firebird"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/poller"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/version"
 )
 
 func main() {
+	log.Printf("tracker-poller build %s (%s)", version.Commit, version.BuiltAt)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -138,6 +140,7 @@ func main() {
 	var (
 		hbMu      sync.Mutex
 		hbPayload = map[string]any{
+			"version":          version.Commit,
 			"batch":            batch,
 			"sweep_interval_s": int(sweepInterval.Seconds()),
 			"sweep_window_h":   sweepWindow.Hours(),

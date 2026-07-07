@@ -18,9 +18,11 @@ import (
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/api"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/migrate"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/version"
 )
 
 func main() {
+	log.Printf("tracker-api build %s (%s)", version.Commit, version.BuiltAt)
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config: %v", err)

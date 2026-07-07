@@ -16,6 +16,7 @@ import (
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/version"
 )
 
 // Config holds the secrets/wiring the server needs.
@@ -71,7 +72,9 @@ func (s *Server) Handler() http.Handler { return s.r }
 
 func (s *Server) routes() {
 	v1 := s.r.Group("/api/v1")
-	v1.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	v1.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "version": version.Commit, "built_at": version.BuiltAt})
+	})
 
 	// ingest — agent HMAC
 	ingest := v1.Group("/ingest", agentHMAC(s.cfg.AgentSecret))
