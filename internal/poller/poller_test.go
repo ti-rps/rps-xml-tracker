@@ -40,6 +40,17 @@ func (f fakeReader) SweepRecent(_ context.Context, _ time.Time) (map[string]fire
 	return out, nil
 }
 
+// ImportedSince retorna as importadas (ignora a janela — é um fake).
+func (f fakeReader) ImportedSince(_ context.Context, _, _ time.Time, _, _ *int) (map[string]firebird.ImportState, error) {
+	out := map[string]firebird.ImportState{}
+	for k, v := range f.states {
+		if v.Importado {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 func ptr(i int) *int { return &i }
 
 func seedArrival(t *testing.T, st store.Store, chave string) {
@@ -405,6 +416,16 @@ func (s splitReader) Lookup(_ context.Context, chaves []string) (map[string]fire
 	return out, nil
 }
 
+func (s splitReader) ImportedSince(_ context.Context, _, _ time.Time, _, _ *int) (map[string]firebird.ImportState, error) {
+	out := map[string]firebird.ImportState{}
+	for k, v := range s.lookup {
+		if v.Importado {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
 // TestSweepOnce_IgnoradasReResolvidasComLookup cobre o P0.2: o sweep agora enxerga
 // ignoradas, mas uma candidata só vira terminal após o Lookup completo confirmar —
 // nunca pelo recorte terminal do sweep (bug histórico CLW/ROSEMBERG).
@@ -455,5 +476,78 @@ func TestSweepOnce_IgnoradasReResolvidasComLookup(t *testing.T) {
 	d, _, _ := st.GetNota(ctx, "IGN_REAL")
 	if d.MotivoIgnorado != "config" {
 		t.Errorf("IGN_REAL motivo=%q, want config", d.MotivoIgnorado)
+	}
+}
+
+// TestReconcileOnce cobre o reconcile contínuo (P0.4): mede as chaves que o Athenas
+// importou mas o tracker não sabe, descarta o skew de borda (tracker já imported com
+// imported_at fora da janela) e, com fix=true, se autocorrige via EmitImportedFor.
+func TestReconcileOnce(t *testing.T) {
+	ctx := context.Background()
+	st := store.NewMemory()
+	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+
+	// DENTRO: tracker sabe imported dentro da janela (bate com o Athenas).
+	// ARRIVED: tracker só viu chegar; Athenas já importou -> faltante real.
+	// NUNCA_VISTA: o agente nunca viu o arquivo; Athenas importou -> faltante real.
+	// SKEW: tracker imported com imported_at fora da janela (DATAROBO antigo) -> não conta.
+	seedArrival(t, st, "DENTRO")
+	seedArrival(t, st, "ARRIVED")
+	seedArrival(t, st, "SKEW")
+	seedImported := func(chave string, at time.Time) {
+		t.Helper()
+		if _, _, err := st.AppendObservations(ctx, []model.Observation{{
+			ChaveAcesso: chave, Stage: model.StageImport, EventType: model.EventImported,
+			ObservedAt: at, Source: "poller:firebird",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedImported("DENTRO", now.Add(-1*time.Hour))
+	seedImported("SKEW", now.Add(-48*time.Hour))
+
+	fr := fakeReader{states: map[string]firebird.ImportState{
+		"DENTRO":      {Found: true, Importado: true},
+		"ARRIVED":     {Found: true, Importado: true},
+		"NUNCA_VISTA": {Found: true, Importado: true},
+		"SKEW":        {Found: true, Importado: true},
+	}}
+	p := New(st, fr)
+	p.now = func() time.Time { return now }
+
+	res, err := p.ReconcileOnce(ctx, 24*time.Hour, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Athena != 4 || res.Tracker != 1 || res.Missing != 2 || res.Fixed != 0 {
+		t.Fatalf("res=%+v, want Athena=4 Tracker=1 Missing=2 (ARRIVED+NUNCA_VISTA; SKEW filtrada) Fixed=0", res)
+	}
+	if len(res.MissingSample) != 2 {
+		t.Fatalf("MissingSample=%v, want as 2 faltantes", res.MissingSample)
+	}
+
+	// fix=true: self-heal emite 'imported' para as faltantes que o Athenas confirmar.
+	res, err = p.ReconcileOnce(ctx, 24*time.Hour, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Missing != 2 || res.Fixed != 2 {
+		t.Fatalf("res=%+v, want Missing=2 Fixed=2", res)
+	}
+	for _, c := range []string{"ARRIVED", "NUNCA_VISTA"} {
+		d, ok, _ := st.GetNota(ctx, c)
+		if !ok || d.Status != model.StatusImported {
+			t.Errorf("%s: status=%v ok=%v, want imported após o fix", d.Status, ok, c)
+		}
+	}
+
+	// terceiro ciclo: nada faltando (as corrigidas agora são imported — mesmo com
+	// imported_at fora da janela, o filtro de skew as descarta).
+	res, err = p.ReconcileOnce(ctx, 24*time.Hour, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Missing != 0 || res.Fixed != 0 {
+		t.Fatalf("res=%+v, want Missing=0 no ciclo pós-fix", res)
 	}
 }
