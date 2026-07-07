@@ -126,9 +126,11 @@ func (c *Cached) computeDetached(compute func(context.Context) (any, error)) (an
 func (c *Cached) Overview(ctx context.Context, f OverviewFilter) (model.Overview, error) {
 	// Sem janela/filtros -> chave fixa "overview" (aquecida no Warm). Com recorte, a
 	// chave inclui as dimensões p/ não colidir entre janelas/filtros distintos (mesma
-	// lição da chave do /empresas).
+	// lição da chave do /empresas). ATENÇÃO: DocType não força mais o live() (00014 —
+	// lê do contador), mas MUDA o resultado — precisa entrar na chave mesmo assim,
+	// senão colide com a chave fixa global.
 	key := "overview"
-	if f.live() {
+	if f.live() || f.DocType != "" {
 		key = fmt.Sprintf("overview|%s|%s|%s|%s|%s|%s",
 			f.DateField, f.From, f.To, ptrIntKey(f.CodigoEmpresa), ptrIntKey(f.CodigoFilial), f.DocType)
 	}

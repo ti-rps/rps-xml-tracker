@@ -96,8 +96,8 @@ type EmpresaFilter struct {
 	PendentesOnly bool          // só empresas com itens não-terminais (arrived/synced/pending_import/stuck)
 	Query         string        // busca por nome da empresa (ILIKE); vazio = todas
 	Sort          string        // "pendentes" = mais pendentes primeiro; vazio/"codigo" = por código
-	DocType       model.DocType // filtra por tipo de documento; força recompute ao vivo (o contador não tem essa dimensão)
-	Direction     string        // entrada|saida; também força recompute ao vivo
+	DocType       model.DocType // filtra por tipo de documento (dimensão do contador desde a 00014)
+	Direction     string        // entrada|saida (dimensão do contador desde a 00014)
 	// faixa de data sobre o campo escolhido (mesmos nomes do GET /notas):
 	// emissao|arrived|synced|imported. Quando preenchida, os agregados são
 	// recomputados ao vivo da notas (o contador empresa_counts não tem dimensão
@@ -134,10 +134,11 @@ func (f OverviewFilter) windowed() bool {
 	return dateColumn(f.DateField) != "" && (f.From != "" || f.To != "")
 }
 
-// live reporta se o overview precisa recomputar ao vivo (janela e/ou filtros) em vez de
-// ler o contador notas_counts (snapshot global).
+// live reporta se o overview precisa recomputar ao vivo (janela de data e/ou
+// empresa/filial) em vez de ler o contador notas_counts. DocType sozinho NÃO força
+// mais o recompute: o contador tem a dimensão (migração 00014).
 func (f OverviewFilter) live() bool {
-	return f.windowed() || f.CodigoEmpresa != nil || f.CodigoFilial != nil || f.DocType != ""
+	return f.windowed() || f.CodigoEmpresa != nil || f.CodigoFilial != nil
 }
 
 // TimeseriesFilter holds the timeseries query params (já validados no handler).

@@ -508,20 +508,25 @@ func overviewWhere(f OverviewFilter) (string, []any) {
 
 func (p *Postgres) Overview(ctx context.Context, f OverviewFilter) (model.Overview, error) {
 	var ov model.Overview
-	// Contagem por status. Sem janela/filtros: do contador mantido (notas_counts) —
-	// instantâneo, sem escanear as 14M (migração 00008). Com janela de data e/ou
-	// filtros (empresa/filial/doc_type): recompute ao vivo das notas no recorte
-	// (o contador não tem essas dimensões), agrupando pelo status ATUAL. mode="flow"
-	// sinaliza ao front que é recorte por janela, não estoque global.
+	// Contagem por status. Sem janela/empresa: do contador mantido (notas_counts,
+	// migrações 00008/00014) — instantâneo, sem escanear as 21M; doc_type é dimensão
+	// do contador, então filtra ali mesmo. Com janela de data e/ou empresa/filial:
+	// recompute ao vivo das notas no recorte (dimensões que o contador não tem),
+	// agrupando pelo status ATUAL. mode="flow" sinaliza ao front que é recorte por
+	// janela, não estoque global.
 	countSQL := `SELECT status, sum(n)::bigint FROM notas_counts GROUP BY status`
 	var countArgs []any
-	if f.live() {
+	switch {
+	case f.live():
 		where, args := overviewWhere(f)
 		countSQL = `SELECT status, count(*) FROM notas WHERE ` + where + ` GROUP BY status`
 		countArgs = args
 		if f.windowed() {
 			ov.Mode = "flow"
 		}
+	case f.DocType != "":
+		countSQL = `SELECT status, sum(n)::bigint FROM notas_counts WHERE doc_type = $1::doc_type GROUP BY status`
+		countArgs = []any{string(f.DocType)}
 	}
 	rows, err := p.pool.Query(ctx, countSQL, countArgs...)
 	if err != nil {
@@ -978,11 +983,11 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 	// caminhos produzem as MESMAS colunas, na mesma ordem, p/ o scan ser compartilhado.
 	var q string
 	var args []any
-	// Recompute ao vivo da notas quando há janela de data OU filtro de doc_type — o
-	// contador empresa_counts não tem nenhuma dessas dimensões. Sem nenhum dos dois,
-	// lê do contador (instantâneo).
+	// Recompute ao vivo da notas SÓ quando há janela de data — a única dimensão que o
+	// contador não tem. doc_type e direction são dimensões do empresa_counts desde a
+	// migração 00014, então filtram no próprio contador (instantâneo).
 	hasWindow := dateColumn(f.DateField) != "" && (f.From != "" || f.To != "")
-	if hasWindow || f.DocType != "" || f.Direction != "" {
+	if hasWindow {
 		q, args = empresasFilteredQuery(f)
 	} else {
 		q, args = empresasCounterQuery(f)
@@ -1009,11 +1014,13 @@ func (p *Postgres) Empresas(ctx context.Context, f EmpresaFilter) ([]model.Empre
 	return out, total, rows.Err()
 }
 
-// empresasCounterQuery lê do contador mantido empresa_counts (migração 00011) —
-// instantâneo, sem o GROUP BY codigo_empresa sobre as 14M da notas (era ~30s, só
-// cacheado). As chaves usam sentinela -1 p/ NULL (empresa/filial); o read traduz com
-// NULLIF(coluna,-1). pendentes = itens não-terminais (espelha pendentes() do store em
-// memória); como FILTER sobre sum() pode dar NULL, COALESCE p/ 0.
+// empresasCounterQuery lê do contador mantido empresa_counts (migrações 00011/00014)
+// — instantâneo, sem o GROUP BY codigo_empresa sobre as 21M da notas (era ~30s, só
+// cacheado). As chaves usam sentinela -1 p/ NULL (empresa/filial) e '' p/ direção
+// ausente; o read traduz empresa/filial com NULLIF(coluna,-1), e doc_type/direction
+// filtram por valor exato (a sentinela '' nunca casa 'entrada'/'saida'). pendentes =
+// itens não-terminais (espelha pendentes() do store em memória); como FILTER sobre
+// sum() pode dar NULL, COALESCE p/ 0.
 func empresasCounterQuery(f EmpresaFilter) (string, []any) {
 	const pend = "COALESCE(sum(n) FILTER (WHERE status IN ('arrived','synced','pending_import','stuck')),0)"
 	having := ""
@@ -1027,11 +1034,23 @@ func empresasCounterQuery(f EmpresaFilter) (string, []any) {
 		order = pend + " DESC, " + order
 	}
 	args := []any{}
-	where := ""
+	conds := []string{}
 	if f.Query != "" {
 		args = append(args, "%"+f.Query+"%")
-		// empresa_counts tem poucos milhares de linhas -> ILIKE direto é instantâneo.
-		where = fmt.Sprintf("WHERE nome ILIKE $%d", len(args))
+		// empresa_counts tem dezenas de milhares de linhas -> ILIKE direto é instantâneo.
+		conds = append(conds, fmt.Sprintf("nome ILIKE $%d", len(args)))
+	}
+	if f.DocType != "" {
+		args = append(args, string(f.DocType))
+		conds = append(conds, fmt.Sprintf("doc_type = $%d::doc_type", len(args)))
+	}
+	if f.Direction != "" {
+		args = append(args, f.Direction)
+		conds = append(conds, fmt.Sprintf("direction = $%d", len(args)))
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
 	}
 	limit := ""
 	if f.Limit > 0 {

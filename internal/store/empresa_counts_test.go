@@ -202,7 +202,8 @@ func reconcile(t *testing.T, ctx context.Context, dsn string) {
 		         status::text s, count(*) n
 		  FROM notas GROUP BY 1,2,3
 		),
-		ctr AS (SELECT codigo_empresa e, codigo_filial f, status::text s, n FROM empresa_counts WHERE n <> 0)
+		ctr AS (SELECT codigo_empresa e, codigo_filial f, status::text s, sum(n) n
+		        FROM empresa_counts GROUP BY 1,2,3 HAVING sum(n) <> 0)
 		SELECT COALESCE(live.e,ctr.e), COALESCE(live.f,ctr.f), COALESCE(live.s,ctr.s),
 		       COALESCE(live.n,0), COALESCE(ctr.n,0)
 		FROM live FULL OUTER JOIN ctr ON live.e=ctr.e AND live.f=ctr.f AND live.s=ctr.s
@@ -273,5 +274,92 @@ func applyAllMigrations(t *testing.T, ctx context.Context, dsn string) {
 		if err := conn.Conn().PgConn().Exec(ctx, up).Close(); err != nil {
 			t.Fatalf("apply %s: %v", filepath.Base(fp), err)
 		}
+	}
+}
+
+// TestCounterDims valida as dimensões doc_type/direction dos contadores (migração
+// 00014): /empresas e /metrics/overview filtrados devem sair do CONTADOR (sem janela
+// de data) com os mesmos números do recompute ao vivo. Roda só com TRACKER_TEST_PG_DSN.
+func TestCounterDims(t *testing.T) {
+	dsn := os.Getenv("TRACKER_TEST_PG_DSN")
+	if dsn == "" {
+		t.Skip("set TRACKER_TEST_PG_DSN to run the Postgres integration test")
+	}
+	ctx := context.Background()
+	applyAllMigrations(t, ctx, dsn)
+	pg, err := NewPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pg.Close()
+
+	emp := 1203
+	at := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	mk := func(chave string, dt model.DocType, cnpjFilial, cnpjEmit, cnpjDest string) []model.Observation {
+		return []model.Observation{
+			{ChaveAcesso: chave, Stage: model.StageArrival, EventType: model.EventFileSeen,
+				ObservedAt: at, DocType: dt, Source: "agent:test", CodigoEmpresa: &emp, NomeEmpresa: "ACME LTDA"},
+			{ChaveAcesso: chave, Stage: model.StageImport, EventType: model.EventImported,
+				ObservedAt: at, Source: "poller:firebird", CodigoEmpresa: &emp, NomeEmpresa: "ACME LTDA",
+				CnpjEmitente: cnpjEmit, CnpjDestinatario: cnpjDest,
+				Direction: model.DirectionFromCNPJs(cnpjFilial, cnpjEmit, cnpjDest)},
+		}
+	}
+	filial := "12345678000190" // raiz 12345678
+	outro := "99887766000155"
+	// 2 NFE saída (filial emite), 1 NFE entrada (filial recebe), 1 NFCE saída.
+	for _, c := range []struct {
+		chave string
+		dt    model.DocType
+		emit  string
+		dest  string
+	}{
+		{"35250712345678000190550010000001231000000001", model.DocNFe, filial, outro},
+		{"35250712345678000190550010000001231000000002", model.DocNFe, filial, outro},
+		{"35250712345678000190550010000001231000000003", model.DocNFe, outro, filial},
+		{"35250712345678000190650010000001231000000004", model.DocNFCe, filial, outro},
+	} {
+		if _, _, err := pg.AppendObservations(ctx, mk(c.chave, c.dt, filial, c.emit, c.dest)); err != nil {
+			t.Fatalf("append %s: %v", c.chave, err)
+		}
+	}
+
+	// /empresas por doc_type (caminho do contador): NFE=3, NFCE=1.
+	nfe, _, err := pg.Empresas(ctx, EmpresaFilter{DocType: model.DocNFe})
+	if err != nil || len(nfe) != 1 || nfe[0].Imported != 3 {
+		t.Fatalf("doc_type=NFE: %+v err=%v (want imported=3)", nfe, err)
+	}
+	nfce, _, err := pg.Empresas(ctx, EmpresaFilter{DocType: model.DocNFCe})
+	if err != nil || len(nfce) != 1 || nfce[0].Imported != 1 {
+		t.Fatalf("doc_type=NFCE: %+v err=%v (want imported=1)", nfce, err)
+	}
+
+	// /empresas por direction: saida=3 (2 NFE + 1 NFCE), entrada=1.
+	saida, _, err := pg.Empresas(ctx, EmpresaFilter{Direction: model.DirSaida})
+	if err != nil || len(saida) != 1 || saida[0].Imported != 3 {
+		t.Fatalf("direction=saida: %+v err=%v (want imported=3)", saida, err)
+	}
+	entrada, _, err := pg.Empresas(ctx, EmpresaFilter{Direction: model.DirEntrada})
+	if err != nil || len(entrada) != 1 || entrada[0].Imported != 1 {
+		t.Fatalf("direction=entrada: %+v err=%v (want imported=1)", entrada, err)
+	}
+
+	// combinado doc_type+direction: NFE saída = 2.
+	comb, _, err := pg.Empresas(ctx, EmpresaFilter{DocType: model.DocNFe, Direction: model.DirSaida})
+	if err != nil || len(comb) != 1 || comb[0].Imported != 2 {
+		t.Fatalf("NFE+saida: %+v err=%v (want imported=2)", comb, err)
+	}
+
+	// overview por doc_type (caminho do contador, sem mode=flow): NFE imported=3.
+	ov, err := pg.Overview(ctx, OverviewFilter{DocType: model.DocNFe})
+	if err != nil || ov.Imported != 3 || ov.Mode != "" {
+		t.Fatalf("overview NFE: %+v err=%v (want imported=3, sem flow)", ov, err)
+	}
+
+	// paridade contador × ao vivo: doc_type + janela de data força o caminho ao vivo;
+	// com a janela cobrindo tudo, os números têm que bater com o contador.
+	live, err := pg.Overview(ctx, OverviewFilter{DocType: model.DocNFe, DateField: "imported", From: "2026-07-01", To: "2026-07-31"})
+	if err != nil || live.Imported != ov.Imported {
+		t.Fatalf("paridade contador×vivo: contador=%d vivo=%d err=%v", ov.Imported, live.Imported, err)
 	}
 }
