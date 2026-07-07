@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -960,6 +961,82 @@ func digitsPrefix(s string, n int) string {
 		}
 	}
 	return string(b)
+}
+
+// Latency implementa o GET /metrics/latency. Duas medições sobre a janela dos últimos
+// `days` dias (limites por current_date, alinhados aos valores date-only):
+//
+//   - chegada→sync: percentis de lat_arrival_sync_s (timestamps reais do agente) das
+//     notas com synced_at na janela, geral + por dia BRT. Percentil por janela de dias
+//     é barato (~30-100k linhas/dia via índice) — o desastre do overview (#35) era
+//     percentil sobre TODA a base. lat<0 é excluída (artefato de backfill).
+//   - sync→import: distribuição em DIAS (mesmo dia/D+1/D+2+) das notas com imported_at
+//     na janela. NUNCA percentil em segundos aqui: imported_at é date-only (meia-noite
+//     BRT), então "mesmo dia" daria negativo. diff<=0 conta como mesmo dia.
+func (p *Postgres) Latency(ctx context.Context, days int) (model.Latency, error) {
+	out := model.Latency{Days: days, TZ: tzSaoPaulo, ArrivalToSync: model.LatencyArrivalSync{Daily: []model.LatencyDaily{}}}
+
+	// chegada→sync: por dia BRT do synced_at.
+	daily, err := p.pool.Query(ctx, fmt.Sprintf(`
+		SELECT (synced_at AT TIME ZONE '%s')::date::text,
+		       count(*),
+		       percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s),
+		       percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s)
+		FROM notas
+		WHERE synced_at >= current_date - $1::int
+		  AND lat_arrival_sync_s IS NOT NULL AND lat_arrival_sync_s >= 0
+		GROUP BY 1 ORDER BY 1`, tzSaoPaulo), days)
+	if err != nil {
+		return out, err
+	}
+	for daily.Next() {
+		var d model.LatencyDaily
+		if err := daily.Scan(&d.Date, &d.Count, &d.P50S, &d.P95S); err != nil {
+			daily.Close()
+			return out, err
+		}
+		out.ArrivalToSync.Daily = append(out.ArrivalToSync.Daily, d)
+		out.ArrivalToSync.Count += d.Count
+	}
+	daily.Close()
+	if err := daily.Err(); err != nil {
+		return out, err
+	}
+	if out.ArrivalToSync.Count > 0 {
+		// geral da janela (percentil não agrega de percentis diários — segunda query).
+		var p50, p95 float64
+		if err := p.pool.QueryRow(ctx, `
+			SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY lat_arrival_sync_s),
+			       percentile_cont(0.95) WITHIN GROUP (ORDER BY lat_arrival_sync_s)
+			FROM notas
+			WHERE synced_at >= current_date - $1::int
+			  AND lat_arrival_sync_s IS NOT NULL AND lat_arrival_sync_s >= 0`, days).
+			Scan(&p50, &p95); err != nil {
+			return out, err
+		}
+		out.ArrivalToSync.P50S, out.ArrivalToSync.P95S = &p50, &p95
+	}
+
+	// sync→import: dias corridos entre os dias BRT de sync e import.
+	si := &out.SyncToImport
+	if err := p.pool.QueryRow(ctx, fmt.Sprintf(`
+		SELECT count(*),
+		       count(*) FILTER (WHERE dd <= 0),
+		       count(*) FILTER (WHERE dd  = 1),
+		       count(*) FILTER (WHERE dd >= 2)
+		FROM (
+		  SELECT (imported_at AT TIME ZONE '%[1]s')::date - (synced_at AT TIME ZONE '%[1]s')::date AS dd
+		  FROM notas
+		  WHERE imported_at >= current_date - $1::int AND synced_at IS NOT NULL
+		) t`, tzSaoPaulo), days).
+		Scan(&si.Count, &si.SameDay, &si.D1, &si.D2Plus); err != nil {
+		return out, err
+	}
+	if si.Count > 0 {
+		pct := func(n int) float64 { return math.Round(10000*float64(n)/float64(si.Count)) / 100 }
+		si.SameDayPct, si.D1Pct, si.D2PlusPct = pct(si.SameDay), pct(si.D1), pct(si.D2Plus)
+	}
+	return out, nil
 }
 
 // orderedAging monta as faixas do aging na ordem canônica (incluindo vazias=0), com

@@ -277,6 +277,45 @@ type Aging struct {
 	ToImport       []AgingBucket `json:"to_import"`
 }
 
+// LatencyDaily é o p50/p95 de UM dia da latência chegada→sync (GET /metrics/latency).
+type LatencyDaily struct {
+	Date  string  `json:"date"` // yyyy-mm-dd (dia BRT do synced_at)
+	Count int     `json:"count"`
+	P50S  float64 `json:"p50_s"`
+	P95S  float64 `json:"p95_s"`
+}
+
+// LatencyArrivalSync agrega a latência chegada→sync da janela. Os dois timestamps vêm
+// do agente (resolução real), então percentis em segundos são honestos aqui.
+type LatencyArrivalSync struct {
+	Count int            `json:"count"`
+	P50S  *float64       `json:"p50_s"` // nil quando count=0
+	P95S  *float64       `json:"p95_s"`
+	Daily []LatencyDaily `json:"daily"`
+}
+
+// LatencySyncImport distribui a espera sync→import em DIAS (mesmo dia / D+1 / D+2+).
+// O imported_at tem granularidade de DATA (o Athenas grava DATAROBO/DATAINCLUSAO à
+// meia-noite), então percentis em segundos seriam lixo — mesmo dia daria negativo
+// (meia-noite < synced_at); dias corridos é a resolução máxima honesta do dado.
+type LatencySyncImport struct {
+	Count      int     `json:"count"`
+	SameDay    int     `json:"same_day"` // inclui diff negativo (sync observado após o import — artefato de backfill)
+	D1         int     `json:"d1"`
+	D2Plus     int     `json:"d2_plus"`
+	SameDayPct float64 `json:"same_day_pct"`
+	D1Pct      float64 `json:"d1_pct"`
+	D2PlusPct  float64 `json:"d2_plus_pct"`
+}
+
+// Latency é a resposta do GET /metrics/latency (janela deslizante de N dias).
+type Latency struct {
+	Days          int                `json:"days"`
+	TZ            string             `json:"tz"`
+	ArrivalToSync LatencyArrivalSync `json:"arrival_to_sync"`
+	SyncToImport  LatencySyncImport  `json:"sync_to_import"`
+}
+
 // AgingBuckets é a ordem canônica das faixas do aging (com o limite superior em dias;
 // 0 = faixa aberta ">30d"). Compartilhado por Postgres e memória.
 var AgingBuckets = []struct {

@@ -73,6 +73,12 @@ type Store interface {
 	// bucket since arrival (notas presas na fila). Faixas em model.BacklogBuckets.
 	BacklogAge(ctx context.Context) ([]model.BacklogBucket, error)
 
+	// Latency returns the pipeline latency metrics over the last N days (janela
+	// deslizante): chegada→sync em percentis de segundos (timestamps reais do agente)
+	// e sync→import em DIAS (imported_at é date-only — percentil em segundos seria
+	// lixo). Barato: janelas indexadas de ~N×30-100k linhas.
+	Latency(ctx context.Context, days int) (model.Latency, error)
+
 	// Aging returns the pending backlog bucketed by age, split into the two waits:
 	// to_sync (status arrived, idade desde arrived_at) e to_import (status synced/
 	// pending_import, idade desde synced_at). Filtrável por empresa/filial/doc_type.
