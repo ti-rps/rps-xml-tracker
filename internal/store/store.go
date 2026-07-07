@@ -45,13 +45,11 @@ type Store interface {
 	// é >= since. Para a correção retroativa do imported_at (janela recente).
 	ListChavesImportedSince(ctx context.Context, since time.Time) ([]string, error)
 
-	// ImportedChavesBetween retorna as chaves com status=imported cujo imported_at cai
-	// na janela [since, until), opcionalmente por empresa/filial. É o lado "tracker" do
-	// reconcile (mesma janela de DATAINCLUSAO no Athenas).
-	ImportedChavesBetween(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) ([]string, error)
-
 	// StatusForChaves retorna o status derivado atual de cada chave dada (as ausentes
-	// não aparecem no mapa). Usado pelo reconcile para rotular/filtrar as faltantes.
+	// não aparecem no mapa). Usado pelo reconcile contínuo: a acurácia do import é
+	// medida perguntando o STATUS das chaves que o Athenas importou — nunca recortando
+	// o tracker por imported_at, cuja granularidade é de DATA (DATAROBO/DATAINCLUSAO
+	// vêm com hora 00:00) e não casa com janela rolante de relógio.
 	StatusForChaves(ctx context.Context, chaves []string) (map[string]model.NotaStatus, error)
 
 	// UpdateImportedObservedAt reescreve o observed_at da observação 'imported' de uma

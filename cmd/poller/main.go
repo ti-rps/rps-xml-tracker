@@ -172,9 +172,9 @@ func main() {
 				if r.Athena > 0 {
 					accuracy = math.Round(10000*float64(r.Athena-r.Missing)/float64(r.Athena)) / 100
 				}
-				log.Printf("reconcile: janela=[%s, %s) athenas=%d tracker=%d faltando=%d sobrando=%d corrigidas=%d acuracia=%.2f%%",
+				log.Printf("reconcile: janela=[%s, %s) athenas=%d rastreadas=%d faltando=%d corrigidas=%d acuracia=%.2f%%",
 					r.Since.Format("01-02 15:04"), r.Until.Format("01-02 15:04"),
-					r.Athena, r.Tracker, r.Missing, r.Extra, r.Fixed, accuracy)
+					r.Athena, r.Tracker, r.Missing, r.Fixed, accuracy)
 				if len(r.MissingSample) > 0 {
 					log.Printf("reconcile: amostra faltantes: %v", r.MissingSample)
 				}
@@ -185,7 +185,7 @@ func main() {
 				hbPayload["reconcile_athenas"] = r.Athena
 				hbPayload["reconcile_tracker"] = r.Tracker
 				hbPayload["reconcile_missing"] = r.Missing
-				hbPayload["reconcile_extra"] = r.Extra
+				delete(hbPayload, "reconcile_extra") // removido (era ruído de skew; ver ReconcileOnce)
 				hbPayload["reconcile_fixed"] = r.Fixed
 				hbPayload["reconcile_accuracy_pct"] = accuracy
 				if len(r.MissingSample) > 0 {
