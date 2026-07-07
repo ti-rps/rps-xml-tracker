@@ -479,21 +479,23 @@ func TestSweepOnce_IgnoradasReResolvidasComLookup(t *testing.T) {
 	}
 }
 
-// TestReconcileOnce cobre o reconcile contínuo (P0.4): mede as chaves que o Athenas
-// importou mas o tracker não sabe, descarta o skew de borda (tracker já imported com
-// imported_at fora da janela) e, com fix=true, se autocorrige via EmitImportedFor.
+// TestReconcileOnce cobre o reconcile contínuo (P0.4): das chaves que o Athenas
+// importou na janela, mede as que o tracker não conhece como imported (por STATUS —
+// nunca por janela de imported_at, que tem granularidade de data) e, com fix=true,
+// se autocorrige via EmitImportedFor.
 func TestReconcileOnce(t *testing.T) {
 	ctx := context.Background()
 	st := store.NewMemory()
 	now := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
 
-	// DENTRO: tracker sabe imported dentro da janela (bate com o Athenas).
+	// IMP_RECENTE: tracker sabe imported (recente) -> conta como Tracker.
+	// IMP_ANTIGA: tracker sabe imported com imported_at date-only bem antigo (fora de
+	//   qualquer janela rolante) -> TAMBÉM conta como Tracker (status, não timestamp).
 	// ARRIVED: tracker só viu chegar; Athenas já importou -> faltante real.
 	// NUNCA_VISTA: o agente nunca viu o arquivo; Athenas importou -> faltante real.
-	// SKEW: tracker imported com imported_at fora da janela (DATAROBO antigo) -> não conta.
-	seedArrival(t, st, "DENTRO")
+	seedArrival(t, st, "IMP_RECENTE")
+	seedArrival(t, st, "IMP_ANTIGA")
 	seedArrival(t, st, "ARRIVED")
-	seedArrival(t, st, "SKEW")
 	seedImported := func(chave string, at time.Time) {
 		t.Helper()
 		if _, _, err := st.AppendObservations(ctx, []model.Observation{{
@@ -503,14 +505,14 @@ func TestReconcileOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	seedImported("DENTRO", now.Add(-1*time.Hour))
-	seedImported("SKEW", now.Add(-48*time.Hour))
+	seedImported("IMP_RECENTE", now.Add(-1*time.Hour))
+	seedImported("IMP_ANTIGA", now.Add(-30*24*time.Hour))
 
 	fr := fakeReader{states: map[string]firebird.ImportState{
-		"DENTRO":      {Found: true, Importado: true},
+		"IMP_RECENTE": {Found: true, Importado: true},
+		"IMP_ANTIGA":  {Found: true, Importado: true},
 		"ARRIVED":     {Found: true, Importado: true},
 		"NUNCA_VISTA": {Found: true, Importado: true},
-		"SKEW":        {Found: true, Importado: true},
 	}}
 	p := New(st, fr)
 	p.now = func() time.Time { return now }
@@ -519,8 +521,8 @@ func TestReconcileOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Athena != 4 || res.Tracker != 1 || res.Missing != 2 || res.Fixed != 0 {
-		t.Fatalf("res=%+v, want Athena=4 Tracker=1 Missing=2 (ARRIVED+NUNCA_VISTA; SKEW filtrada) Fixed=0", res)
+	if res.Athena != 4 || res.Tracker != 2 || res.Missing != 2 || res.Fixed != 0 {
+		t.Fatalf("res=%+v, want Athena=4 Tracker=2 Missing=2 (ARRIVED+NUNCA_VISTA) Fixed=0", res)
 	}
 	if len(res.MissingSample) != 2 {
 		t.Fatalf("MissingSample=%v, want as 2 faltantes", res.MissingSample)
@@ -541,13 +543,12 @@ func TestReconcileOnce(t *testing.T) {
 		}
 	}
 
-	// terceiro ciclo: nada faltando (as corrigidas agora são imported — mesmo com
-	// imported_at fora da janela, o filtro de skew as descarta).
+	// terceiro ciclo: nada faltando (as corrigidas agora são imported).
 	res, err = p.ReconcileOnce(ctx, 24*time.Hour, 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Missing != 0 || res.Fixed != 0 {
-		t.Fatalf("res=%+v, want Missing=0 no ciclo pós-fix", res)
+	if res.Missing != 0 || res.Tracker != 4 || res.Fixed != 0 {
+		t.Fatalf("res=%+v, want Missing=0 Tracker=4 no ciclo pós-fix", res)
 	}
 }
