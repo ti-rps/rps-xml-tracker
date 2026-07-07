@@ -184,6 +184,43 @@ func (m *Memory) ListChavesImportedSince(_ context.Context, since time.Time) ([]
 	return out, nil
 }
 
+func (m *Memory) ImportedChavesBetween(_ context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []string
+	for _, n := range m.allNotas() {
+		if n.Status != model.StatusImported || n.ImportedAt == nil ||
+			n.ImportedAt.Before(since) || !n.ImportedAt.Before(until) {
+			continue
+		}
+		if codigoEmpresa != nil && (n.CodigoEmpresa == nil || *n.CodigoEmpresa != *codigoEmpresa) {
+			continue
+		}
+		if codigoFilial != nil && (n.CodigoFilial == nil || *n.CodigoFilial != *codigoFilial) {
+			continue
+		}
+		out = append(out, n.ChaveAcesso)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (m *Memory) StatusForChaves(_ context.Context, chaves []string) (map[string]model.NotaStatus, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	want := make(map[string]struct{}, len(chaves))
+	for _, c := range chaves {
+		want[c] = struct{}{}
+	}
+	out := make(map[string]model.NotaStatus, len(chaves))
+	for _, n := range m.allNotas() {
+		if _, ok := want[n.ChaveAcesso]; ok {
+			out[n.ChaveAcesso] = n.Status
+		}
+	}
+	return out, nil
+}
+
 func (m *Memory) UpdateImportedObservedAt(_ context.Context, chave string, observedAt time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

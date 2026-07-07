@@ -8,11 +8,16 @@
 //	TRACKER_PG_DSN   Postgres DSN (when TRACKER_STORE=postgres)
 //	TRACKER_POLL_INTERVAL  e.g. 30s (default)
 //	TRACKER_POLL_BATCH     chaves in-flight por ciclo (default 8000)
+//	TRACKER_RECONCILE_INTERVAL  reconcile contínuo (default 30m; 0 desliga)
+//	TRACKER_RECONCILE_WINDOW    janela deslizante auditada (default 24h)
+//	TRACKER_RECONCILE_GRACE     desconto do atraso de detecção (default 15m)
+//	TRACKER_RECONCILE_FIX       self-heal das faltantes (default true; "false" desliga)
 package main
 
 import (
 	"context"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"strconv"
@@ -105,6 +110,31 @@ func main() {
 		}
 	}
 
+	// Reconcile contínuo (P0.4): a cada intervalo compara a janela deslizante entre o
+	// Athenas (IMPORTADO=1 por DATAINCLUSAO) e o tracker (imported_at) e publica a
+	// acurácia do import no heartbeat (GET /status). 0 desliga. O grace desconta o
+	// atraso natural de detecção (sweep/rotação). Com fix (default), o tracker se
+	// autocorrige emitindo as 'imported' que o Athenas confirmar.
+	reconcileInterval := 30 * time.Minute
+	if v := os.Getenv("TRACKER_RECONCILE_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			reconcileInterval = d
+		}
+	}
+	reconcileWindow := 24 * time.Hour
+	if v := os.Getenv("TRACKER_RECONCILE_WINDOW"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			reconcileWindow = d
+		}
+	}
+	reconcileGrace := 15 * time.Minute
+	if v := os.Getenv("TRACKER_RECONCILE_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			reconcileGrace = d
+		}
+	}
+	reconcileFix := os.Getenv("TRACKER_RECONCILE_FIX") != "false"
+
 	var (
 		hbMu      sync.Mutex
 		hbPayload = map[string]any{
@@ -123,8 +153,52 @@ func main() {
 
 	p := poller.New(st, rd)
 	p.SetBatch(batch)
-	log.Printf("poller iniciando (intervalo %s, lote %d, sweep a cada %s janela %s)",
-		interval, batch, sweepInterval, sweepWindow)
+	log.Printf("poller iniciando (intervalo %s, lote %d, sweep a cada %s janela %s, reconcile a cada %s janela %s grace %s fix=%v)",
+		interval, batch, sweepInterval, sweepWindow, reconcileInterval, reconcileWindow, reconcileGrace, reconcileFix)
+
+	if reconcileInterval > 0 {
+		go p.RunReconcile(ctx, reconcileInterval, reconcileWindow, reconcileGrace, reconcileFix,
+			func(r poller.ReconcileResult, err error) {
+				if err != nil {
+					log.Printf("reconcile erro: %v", err)
+					hbMu.Lock()
+					hbPayload["reconcile_error"] = err.Error()
+					pay := copyPayload()
+					hbMu.Unlock()
+					_ = st.UpsertHeartbeat(context.Background(), "poller", pay)
+					return
+				}
+				accuracy := 100.0
+				if r.Athena > 0 {
+					accuracy = math.Round(10000*float64(r.Athena-r.Missing)/float64(r.Athena)) / 100
+				}
+				log.Printf("reconcile: janela=[%s, %s) athenas=%d tracker=%d faltando=%d sobrando=%d corrigidas=%d acuracia=%.2f%%",
+					r.Since.Format("01-02 15:04"), r.Until.Format("01-02 15:04"),
+					r.Athena, r.Tracker, r.Missing, r.Extra, r.Fixed, accuracy)
+				if len(r.MissingSample) > 0 {
+					log.Printf("reconcile: amostra faltantes: %v", r.MissingSample)
+				}
+				hbMu.Lock()
+				delete(hbPayload, "reconcile_error")
+				hbPayload["reconcile_at"] = time.Now().Format(time.RFC3339)
+				hbPayload["reconcile_window_h"] = reconcileWindow.Hours()
+				hbPayload["reconcile_athenas"] = r.Athena
+				hbPayload["reconcile_tracker"] = r.Tracker
+				hbPayload["reconcile_missing"] = r.Missing
+				hbPayload["reconcile_extra"] = r.Extra
+				hbPayload["reconcile_fixed"] = r.Fixed
+				hbPayload["reconcile_accuracy_pct"] = accuracy
+				if len(r.MissingSample) > 0 {
+					hbPayload["reconcile_missing_sample"] = r.MissingSample
+				} else {
+					delete(hbPayload, "reconcile_missing_sample")
+				}
+				pay := copyPayload()
+				hbMu.Unlock()
+				_ = st.UpsertHeartbeat(context.Background(), "poller", pay)
+			})
+	}
+
 	p.RunWithSweep(ctx, interval, sweepInterval, sweepWindow,
 		func(r poller.Result, err error) {
 			if err != nil {
