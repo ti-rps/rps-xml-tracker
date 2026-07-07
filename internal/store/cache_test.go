@@ -117,3 +117,34 @@ func TestCached_Warm(t *testing.T) {
 		t.Fatalf("Warm não deixou o overview em cache: chamadas foram %d->%d", before, got)
 	}
 }
+
+// docTypeOverviewStore devolve números diferentes por doc_type, p/ detectar colisão.
+type docTypeOverviewStore struct {
+	Store
+	calls int32
+}
+
+func (d *docTypeOverviewStore) Overview(_ context.Context, f OverviewFilter) (model.Overview, error) {
+	atomic.AddInt32(&d.calls, 1)
+	n := map[model.DocType]int{"": 100, model.DocNFe: 60}[f.DocType]
+	return model.Overview{StatusCounts: model.StatusCounts{Imported: n}}, nil
+}
+
+// TestCached_OverviewKeyIncludesDocType protege contra a regressão da 00014: DocType
+// deixou de forçar o live() (lê do contador), mas MUDA o resultado — se ele sair da
+// chave de cache, o overview filtrado colide com a chave fixa global "overview".
+func TestCached_OverviewKeyIncludesDocType(t *testing.T) {
+	base := &docTypeOverviewStore{Store: NewMemory()}
+	c := NewCached(base, time.Minute)
+	ctx := context.Background()
+
+	if ov, _ := c.Overview(ctx, OverviewFilter{}); ov.Imported != 100 {
+		t.Fatalf("global: esperava 100, veio %d", ov.Imported)
+	}
+	if ov, _ := c.Overview(ctx, OverviewFilter{DocType: model.DocNFe}); ov.Imported != 60 {
+		t.Fatalf("doc_type=NFE colidiu com a chave global: esperava 60, veio %d", ov.Imported)
+	}
+	if n := atomic.LoadInt32(&base.calls); n != 2 {
+		t.Fatalf("esperava 2 computes (1 por recorte), veio %d", n)
+	}
+}
