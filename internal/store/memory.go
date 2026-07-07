@@ -456,6 +456,81 @@ func (m *Memory) Empresas(_ context.Context, f EmpresaFilter) ([]model.EmpresaAg
 	return out, total, nil
 }
 
+// Latency espelha a implementação Postgres: chegada→sync em percentis (timestamps
+// reais), sync→import em dias BRT (imported_at é date-only). Janela por dia BRT.
+func (m *Memory) Latency(_ context.Context, days int) (model.Latency, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := model.Latency{Days: days, TZ: "America/Sao_Paulo", ArrivalToSync: model.LatencyArrivalSync{Daily: []model.LatencyDaily{}}}
+	loc, _ := time.LoadLocation("America/Sao_Paulo")
+	if loc == nil {
+		loc = time.FixedZone("-03", -3*3600)
+	}
+	today := time.Now().In(loc)
+	cutoff := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -days)
+
+	byDay := map[string][]float64{}
+	var all []float64
+	si := &out.SyncToImport
+	for _, n := range m.allNotas() {
+		if n.SyncedAt != nil && !n.SyncedAt.Before(cutoff) && n.LatArrivalSyncS != nil && *n.LatArrivalSyncS >= 0 {
+			day := n.SyncedAt.In(loc).Format("2006-01-02")
+			byDay[day] = append(byDay[day], float64(*n.LatArrivalSyncS))
+			all = append(all, float64(*n.LatArrivalSyncS))
+		}
+		if n.ImportedAt != nil && !n.ImportedAt.Before(cutoff) && n.SyncedAt != nil {
+			iy, im, id := n.ImportedAt.In(loc).Date()
+			sy, sm, sd := n.SyncedAt.In(loc).Date()
+			dd := int(time.Date(iy, im, id, 0, 0, 0, 0, time.UTC).Sub(time.Date(sy, sm, sd, 0, 0, 0, 0, time.UTC)).Hours() / 24)
+			si.Count++
+			switch {
+			case dd <= 0:
+				si.SameDay++
+			case dd == 1:
+				si.D1++
+			default:
+				si.D2Plus++
+			}
+		}
+	}
+	dias := make([]string, 0, len(byDay))
+	for d := range byDay {
+		dias = append(dias, d)
+	}
+	sort.Strings(dias)
+	for _, d := range dias {
+		v := byDay[d]
+		out.ArrivalToSync.Daily = append(out.ArrivalToSync.Daily, model.LatencyDaily{
+			Date: d, Count: len(v), P50S: percentile(v, 0.5), P95S: percentile(v, 0.95)})
+		out.ArrivalToSync.Count += len(v)
+	}
+	if len(all) > 0 {
+		p50, p95 := percentile(all, 0.5), percentile(all, 0.95)
+		out.ArrivalToSync.P50S, out.ArrivalToSync.P95S = &p50, &p95
+	}
+	if si.Count > 0 {
+		pct := func(n int) float64 { return float64(int(10000*float64(n)/float64(si.Count)+0.5)) / 100 }
+		si.SameDayPct, si.D1Pct, si.D2PlusPct = pct(si.SameDay), pct(si.D1), pct(si.D2Plus)
+	}
+	return out, nil
+}
+
+// percentile é o percentile_cont (interpolação linear) sobre uma amostra.
+func percentile(v []float64, q float64) float64 {
+	if len(v) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), v...)
+	sort.Float64s(s)
+	pos := q * float64(len(s)-1)
+	lo := int(pos)
+	if lo >= len(s)-1 {
+		return s[len(s)-1]
+	}
+	frac := pos - float64(lo)
+	return s[lo] + frac*(s[lo+1]-s[lo])
+}
+
 func (m *Memory) Aging(_ context.Context, f AgingFilter) (model.Aging, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

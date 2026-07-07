@@ -91,6 +91,7 @@ func (s *Server) routes() {
 	read.GET("/metrics/doctypes", s.handleDocTypes)
 	read.GET("/metrics/backlog-age", s.handleBacklogAge)
 	read.GET("/metrics/aging", s.handleAging)
+	read.GET("/metrics/latency", s.handleLatency)
 	read.GET("/empresas", s.handleEmpresas)
 	read.GET("/nfse/import", s.handleNfseImport)
 	read.GET("/status", s.handleStatus)
@@ -197,6 +198,24 @@ func (s *Server) handleAging(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, ag)
+}
+
+// handleLatency serve o GET /metrics/latency?days=7 (1..90). Chegada→sync em
+// percentis de segundos; sync→import em distribuição de dias (imported_at é
+// date-only — ver model.LatencySyncImport).
+func (s *Server) handleLatency(c *gin.Context) {
+	days := 7
+	if v := c.Query("days"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= 90 {
+			days = n
+		}
+	}
+	lat, err := s.st.Latency(c.Request.Context(), days)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao calcular latência"})
+		return
+	}
+	c.JSON(http.StatusOK, lat)
 }
 
 func (s *Server) handleBacklogAge(c *gin.Context) {

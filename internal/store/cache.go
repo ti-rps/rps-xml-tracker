@@ -192,6 +192,16 @@ func (c *Cached) GetStatus(ctx context.Context) ([]model.ServiceStatus, error) {
 	return c.Store.GetStatus(ctx)
 }
 
+func (c *Cached) Latency(ctx context.Context, days int) (model.Latency, error) {
+	v, err := c.get(fmt.Sprintf("latency|%d", days), func(cctx context.Context) (any, error) {
+		return c.Store.Latency(cctx, days)
+	})
+	if err != nil {
+		return model.Latency{}, err
+	}
+	return v.(model.Latency), nil
+}
+
 func (c *Cached) Timeseries(ctx context.Context, f TimeseriesFilter) (model.Timeseries, error) {
 	key := fmt.Sprintf("ts|%d|%s", f.RangeDays, f.Bucket)
 	v, err := c.get(key, func(cctx context.Context) (any, error) {
