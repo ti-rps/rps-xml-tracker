@@ -184,27 +184,6 @@ func (m *Memory) ListChavesImportedSince(_ context.Context, since time.Time) ([]
 	return out, nil
 }
 
-func (m *Memory) ImportedChavesBetween(_ context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) ([]string, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	var out []string
-	for _, n := range m.allNotas() {
-		if n.Status != model.StatusImported || n.ImportedAt == nil ||
-			n.ImportedAt.Before(since) || !n.ImportedAt.Before(until) {
-			continue
-		}
-		if codigoEmpresa != nil && (n.CodigoEmpresa == nil || *n.CodigoEmpresa != *codigoEmpresa) {
-			continue
-		}
-		if codigoFilial != nil && (n.CodigoFilial == nil || *n.CodigoFilial != *codigoFilial) {
-			continue
-		}
-		out = append(out, n.ChaveAcesso)
-	}
-	sort.Strings(out)
-	return out, nil
-}
-
 func (m *Memory) StatusForChaves(_ context.Context, chaves []string) (map[string]model.NotaStatus, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

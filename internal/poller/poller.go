@@ -8,12 +8,12 @@ package poller
 
 import (
 	"context"
+	"sort"
 	"time"
 	"unicode/utf8"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/firebird"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
-	"github.com/EnzzoHosaki/rps-xml-tracker/internal/reconcile"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
 )
 
@@ -347,27 +347,26 @@ func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, e
 type ReconcileResult struct {
 	Since, Until  time.Time
 	Athena        int      // chaves IMPORTADO=1 no Athenas na janela (por DATAINCLUSAO)
-	Tracker       int      // chaves imported no tracker na janela (por imported_at)
-	Missing       int      // Athenas importou e o tracker não sabia (após descartar skew de borda)
-	Extra         int      // tracker imported na janela sem par no recorte do Athenas (ruído de borda esperado)
+	Tracker       int      // dessas, quantas o tracker já conhece como imported
+	Missing       int      // Athenas importou e o tracker não sabia (Athena - Tracker)
 	MissingSample []string // até 5 chaves faltantes, p/ diagnóstico no heartbeat
 	Fixed         int      // observações 'imported' novas gravadas pelo self-heal (fix=true)
 }
 
-// ReconcileOnce compara a janela deslizante [now-grace-window, now-grace) entre o
-// Athenas (TABLISTACHAVEACESSO, IMPORTADO=1 por DATAINCLUSAO) e o tracker (imported_at)
-// e mede as chaves que o Athenas importou mas o tracker não sabe — a métrica de
-// acurácia do import. O grace desconta o atraso natural de detecção (sweep/rotação):
-// sem ele, toda importação dos últimos segundos contaria como "faltando".
+// ReconcileOnce mede a acurácia do import: das chaves que o Athenas importou na janela
+// deslizante [now-grace-window, now-grace) (TABLISTACHAVEACESSO, IMPORTADO=1 por
+// DATAINCLUSAO), quantas o tracker conhece como imported (StatusForChaves). O grace
+// desconta o atraso natural de detecção (sweep/rotação): sem ele, toda importação dos
+// últimos minutos contaria como "faltando".
 //
-// Filtro de skew de borda: o imported_at do tracker vem do DATAROBO (hora do robô),
-// que pode cair fora da janela de DATAINCLUSAO (hora que a linha entrou) — a chave some
-// do recorte do tracker sem ser divergência real. Por isso as faltantes do Diff são
-// re-checadas com StatusForChaves e as já-imported são descartadas. O mesmo skew produz
-// o Extra (tracker na janela, Athenas fora), reportado só como informativo.
+// A janela existe SÓ do lado do Athenas. Não dá para recortar o tracker por
+// imported_at na mesma janela: o imported_at vem do DATAROBO/DATAINCLUSAO, que neste
+// Athenas têm granularidade de DATA (hora sempre 00:00) — uma janela rolante de
+// relógio nunca casa com valores date-only (medido em prod: tracker=0 com 30k
+// importadas no dia). Perguntar o STATUS da chave é imune a granularidade e skew.
 //
-// Com fix=true, as faltantes reais passam pelo EmitImportedFor (self-heal): o Athenas
-// é re-consultado via Lookup e só o que ele confirmar IMPORTADO=1 vira observação —
+// Com fix=true, as faltantes passam pelo EmitImportedFor (self-heal): o Athenas é
+// re-consultado via Lookup e só o que ele confirmar IMPORTADO=1 vira observação —
 // idempotente e seguro por construção.
 func (p *Poller) ReconcileOnce(ctx context.Context, window, grace time.Duration, fix bool) (ReconcileResult, error) {
 	var res ReconcileResult
@@ -378,31 +377,28 @@ func (p *Poller) ReconcileOnce(ctx context.Context, window, grace time.Duration,
 	if err != nil {
 		return res, err
 	}
-	athenaChaves := make([]string, 0, len(athena))
-	for c := range athena {
-		athenaChaves = append(athenaChaves, c)
+	res.Athena = len(athena)
+	if res.Athena == 0 {
+		return res, nil
 	}
-	tracker, err := p.st.ImportedChavesBetween(ctx, res.Since, res.Until, nil, nil)
+	chaves := make([]string, 0, len(athena))
+	for c := range athena {
+		chaves = append(chaves, c)
+	}
+	sort.Strings(chaves) // amostra de faltantes determinística entre ciclos
+
+	statuses, err := p.st.StatusForChaves(ctx, chaves)
 	if err != nil {
 		return res, err
 	}
-	missing, extra := reconcile.Diff(athenaChaves, tracker)
-	res.Athena, res.Tracker, res.Extra = len(athenaChaves), len(tracker), len(extra)
-
-	if len(missing) > 0 {
-		statuses, err := p.st.StatusForChaves(ctx, missing)
-		if err != nil {
-			return res, err
+	var missing []string
+	for _, c := range chaves {
+		if statuses[c] != model.StatusImported {
+			missing = append(missing, c)
 		}
-		real := missing[:0]
-		for _, c := range missing {
-			if statuses[c] != model.StatusImported {
-				real = append(real, c)
-			}
-		}
-		missing = real
 	}
 	res.Missing = len(missing)
+	res.Tracker = res.Athena - res.Missing
 	if n := len(missing); n > 0 {
 		if n > 5 {
 			n = 5
