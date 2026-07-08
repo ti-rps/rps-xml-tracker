@@ -17,6 +17,7 @@ import (
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/api"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/migrate"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/netpath"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/version"
 )
@@ -100,6 +101,8 @@ func loadConfig() (api.Config, error) {
 	if o := os.Getenv("TRACKER_CORS_ORIGINS"); o != "" {
 		cfg.CORSOrigins = strings.Split(o, ",")
 	}
+	// tradução caminho interno → rede na exibição ("interno=rede;..."); vazio = default
+	cfg.NetPath = netpath.FromEnv(os.Getenv("TRACKER_NETPATH_MAP"))
 	if cfg.JWTSecret == "" {
 		return cfg, fmt.Errorf("MAESTRO_JWT_SECRET é obrigatório (fail-closed)")
 	}

@@ -113,7 +113,10 @@ type Observation struct {
 	Source        string    `json:"source"`
 	DocType       DocType   `json:"doc_type"`
 	FilePath      string    `json:"file_path,omitempty"`
-	FileHash      string    `json:"file_hash,omitempty"`
+	// FilePathRede é o FilePath traduzido para a visão da REDE (R:\..., share
+	// \\srvdoc01\REDE) — calculado pela API ao servir, nunca persistido.
+	FilePathRede string `json:"file_path_rede,omitempty"`
+	FileHash     string `json:"file_hash,omitempty"`
 	CodigoEmpresa *int      `json:"codigo_empresa,omitempty"`
 	CodigoFilial  *int      `json:"codigo_filial,omitempty"`
 	// metadados da nota (do parse do XML ou da linha do Firebird)

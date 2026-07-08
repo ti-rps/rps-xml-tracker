@@ -44,9 +44,11 @@ func ingestBody() []byte {
 		Agent: "SRVIMPORT",
 		Batch: []model.Observation{
 			{ChaveAcesso: "K1", Stage: model.StageArrival, EventType: model.EventFileSeen,
-				ObservedAt: time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC), DocType: model.DocNFe},
+				ObservedAt: time.Date(2026, 6, 8, 9, 0, 0, 0, time.UTC), DocType: model.DocNFe,
+				FilePath: `F:\Xml_ASincronizar\ZZZ_XML_BOT\k1.xml`},
 			{ChaveAcesso: "K1", Stage: model.StageSync, EventType: model.EventFileMoved,
-				ObservedAt: time.Date(2026, 6, 8, 9, 30, 0, 0, time.UTC), DocType: model.DocNFe},
+				ObservedAt: time.Date(2026, 6, 8, 9, 30, 0, 0, time.UTC), DocType: model.DocNFe,
+				FilePath: `F:\XML SINCRONIZADO\04771171\202606\NFe\k1.xml`},
 		},
 	}
 	b, _ := json.Marshal(req)
@@ -102,6 +104,16 @@ func TestIngestAndGetNota_EndToEnd(t *testing.T) {
 	}
 	if detail.LatArrivalSyncS == nil || *detail.LatArrivalSyncS != 1800 {
 		t.Errorf("lat = %v, want 1800", detail.LatArrivalSyncS)
+	}
+	// spans ganham o caminho na visão da rede (F:\ interno -> R:\ do share)
+	wantRede := map[model.Stage]string{
+		model.StageArrival: `R:\XML_ASINCRONIZAR\ZZZ_XML_BOT\k1.xml`,
+		model.StageSync:    `R:\XML_SINCRONIZADO\04771171\202606\NFe\k1.xml`,
+	}
+	for _, sp := range detail.Spans {
+		if sp.FilePathRede != wantRede[sp.Stage] {
+			t.Errorf("span %s file_path_rede = %q, want %q", sp.Stage, sp.FilePathRede, wantRede[sp.Stage])
+		}
 	}
 }
 

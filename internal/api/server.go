@@ -15,15 +15,17 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/netpath"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/version"
 )
 
 // Config holds the secrets/wiring the server needs.
 type Config struct {
-	JWTSecret   string   // MAESTRO_JWT_SECRET (validated non-empty at boot)
-	AgentSecret string   // shared HMAC secret with the SRVIMPORT agent
-	CORSOrigins []string // allowed browser origins for the maestro_web UI ("" = none)
+	JWTSecret   string          // MAESTRO_JWT_SECRET (validated non-empty at boot)
+	AgentSecret string          // shared HMAC secret with the SRVIMPORT agent
+	CORSOrigins []string        // allowed browser origins for the maestro_web UI ("" = none)
+	NetPath     *netpath.Mapper // tradução F:\ (interno) → R:\ (rede) na exibição; nil = Default
 }
 
 // Server is the HTTP server.
@@ -34,6 +36,9 @@ type Server struct {
 }
 
 func New(st store.Store, cfg Config) *Server {
+	if cfg.NetPath == nil {
+		cfg.NetPath = netpath.Default()
+	}
 	s := &Server{st: st, cfg: cfg, r: gin.New()}
 	s.r.Use(gin.Recovery())
 	if len(cfg.CORSOrigins) > 0 {
@@ -300,6 +305,11 @@ func (s *Server) handleGetNota(c *gin.Context) {
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "nota não encontrada"})
 		return
+	}
+	// anexa o caminho na visão da rede (R:\...) — o file_path gravado é a visão
+	// interna do SRVIMPORT (F:\...), que ninguém fora dele consegue abrir
+	for i := range detail.Spans {
+		detail.Spans[i].FilePathRede = s.cfg.NetPath.Rede(detail.Spans[i].FilePath)
 	}
 	c.JSON(http.StatusOK, detail)
 }
