@@ -99,6 +99,14 @@ const (
 	EventSeenPending   = "seen_pending"   // visto no Athenas, IMPORTADO=0 (aguardando importação)
 	EventImported      = "imported"       // IMPORTADO 0->1 detectado
 	EventImportIgnored = "import_ignored" // IMPORTACAOIGNORADA=1
+
+	// Eventos do SYNCER (shadow-sync F1), stage sync, POR PARTICIPAÇÃO. Só
+	// sync_moved é progresso (seta SyncedAt, como file_moved); os outros dois são
+	// só timeline. O file_moved do AGENTE continua existindo e é a confirmação
+	// INDEPENDENTE do sync_moved (o agente não sabe que o syncer existe).
+	EventSyncMoved      = "sync_moved"       // rename no SINCRONIZADO concluído (payload: url, origem)
+	EventSyncDBInserted = "sync_db_inserted" // INSERT na TABLISTACHAVEACESSO ok (payload: codigo_chaveacesso)
+	EventSyncFailed     = "sync_failed"      // falha em qualquer passo (payload: passo, erro)
 )
 
 // Observation is one immutable, append-only signal about a nota, from any source.

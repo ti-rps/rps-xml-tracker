@@ -23,6 +23,18 @@
 > Notas ao deploy: (1) a 1ª reemissão de seen_pending pós-deploy é aceita de novo
 > (chave de dedup nova) — ruído único e inofensivo na timeline; (2) notas já
 > terminais NÃO reabrem (recompute só acontece em observação nova aceita).
+>
+> **F1 — código implementado (2026-07-09):** `internal/syncer` (plano+execução
+> por participação, journal bbolt, retomada de crash, conflito nunca sobrescreve),
+> `cmd/syncer` (serviço Windows kardianos; trava TRACKER_SYNCER_ENABLED; modos
+> --dry-run/--chave+--file/--once; heartbeat "syncer" no GET /status),
+> `internal/firebird/writer.go` (TRACKER_FB_WRITE_DSN, GEN_ID, INSERT da F0 sem
+> TIPODOCUMENTO/TIPO, UTF-8→Latin-1), eventos sync_* no derive (só
+> file_moved/sync_moved progridem). Gatilho single-key exige `--file` (o nome do
+> arquivo não contém a chave; pegar o file_path da observação de chegada).
+> syncpath aceita CPF (11 díg.) de produtor rural. Falta: rodar o dry-run dias no
+> SRVIMPORT e comparar os planos (syncer-plans.jsonl) com o que o DownloadXML
+> fizer (via --check-path) antes do piloto F2.
 
 ## 0. Pré-requisito de modelagem: participação por empresa (nota_empresa)
 

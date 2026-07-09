@@ -46,6 +46,25 @@ func TestDeriveEntrada(t *testing.T) {
 	}
 }
 
+// Produtor rural: o "CNPJ da filial" é um CPF (11 dígitos) — as URLs reais da F0
+// trazem o CPF cru no 2º segmento (ex.: \EDISON NOVAES...\14290774504\CTe\...).
+func TestDeriveCPFProdutorRural(t *testing.T) {
+	got, err := Derive(Input{
+		NomeEmpresa: "EDISON NOVAES DE MACEDO",
+		CnpjFilial:  "142.907.745-04",
+		DocType:     model.DocCTe,
+		Direction:   model.DirEntrada,
+		DataEmissao: "2026-06-10",
+		Chave:       strings.Repeat("2", 44),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `\14290774504\CTe\ENTRADA\`) {
+		t.Errorf("Derive = %s; esperado CPF de 11 dígitos no 2º segmento", got)
+	}
+}
+
 func TestDeriveErros(t *testing.T) {
 	ok := Input{
 		NomeEmpresa: "EMPRESA LTDA",

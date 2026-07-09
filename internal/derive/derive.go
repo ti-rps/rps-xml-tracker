@@ -77,7 +77,12 @@ func NotaParticipacoes(chave string, obs []model.Observation) (model.Nota, []mod
 		case model.StageArrival:
 			setIfEarlier(&n.ArrivedAt, o.ObservedAt)
 		case model.StageSync:
-			setIfEarlier(&n.SyncedAt, o.ObservedAt)
+			// F1: só os eventos de PROGRESSO marcam o sync — file_moved (agente) e
+			// sync_moved (syncer). sync_db_inserted/sync_failed são só timeline:
+			// um INSERT ou uma falha não significam que o arquivo foi posicionado.
+			if syncProgress(o.EventType) {
+				setIfEarlier(&n.SyncedAt, o.ObservedAt)
+			}
 		case model.StageImport:
 			switch o.EventType {
 			case model.EventImportIgnored:
@@ -120,7 +125,11 @@ func participacoes(sorted []model.Observation) []model.Participacao {
 	idx := map[key]int{}
 	var parts []model.Participacao
 	for _, o := range sorted {
-		if o.CodigoEmpresa == nil || (o.Stage != model.StageImport && o.Stage != model.StageSync) {
+		// participação nasce/atualiza só com observação de import ou de sync com
+		// PROGRESSO (file_moved/sync_moved). sync_failed/sync_db_inserted são só
+		// timeline: uma falha de sync não pode fazer a participação parecer viva
+		// (rebaixaria a nota inteira p/ pending no status agregado).
+		if o.CodigoEmpresa == nil || (o.Stage != model.StageImport && !(o.Stage == model.StageSync && syncProgress(o.EventType))) {
 			continue
 		}
 		k := key{*o.CodigoEmpresa, 0}
@@ -244,6 +253,12 @@ func status(n model.Nota, parts []model.Participacao) model.NotaStatus {
 	default:
 		return model.StatusPendingImport
 	}
+}
+
+// syncProgress reporta se um evento de stage sync representa o arquivo
+// efetivamente posicionado no SINCRONIZADO (progresso do pipeline).
+func syncProgress(event string) bool {
+	return event == model.EventFileMoved || event == model.EventSyncMoved
 }
 
 func setIfEmpty(dst *string, v string) {

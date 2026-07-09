@@ -44,9 +44,11 @@ func Derive(in Input) (string, error) {
 	if nome == "" {
 		return "", fmt.Errorf("syncpath: nome da empresa vazio (ou só caracteres inválidos NTFS): %q", in.NomeEmpresa)
 	}
+	// 14 dígitos = CNPJ; 11 = CPF (produtor rural — as URLs reais da F0 têm o CPF
+	// cru no 2º segmento, ex.: \14290774504\).
 	cnpj := digits(in.CnpjFilial)
-	if len(cnpj) != 14 {
-		return "", fmt.Errorf("syncpath: CNPJ da filial precisa ter 14 dígitos: %q", in.CnpjFilial)
+	if len(cnpj) != 14 && len(cnpj) != 11 {
+		return "", fmt.Errorf("syncpath: documento da filial precisa ter 14 (CNPJ) ou 11 (CPF) dígitos: %q", in.CnpjFilial)
 	}
 	doc, err := DocSegment(in.DocType)
 	if err != nil {
