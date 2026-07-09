@@ -49,6 +49,15 @@ func main() {
 	tipo := flag.String("tipo", "", "só p/ source=entradasaida: E (entrada) | S (saida) | vazio (ambos)")
 	fix := flag.Bool("fix", false, "reconcile: além de reportar, emite as observações 'imported' que faltam (autocorreção)")
 	limit := flag.Int("limit", 30, "reconcile: máximo de chaves listadas por seção no relatório (0 = todas)")
+	// Modos de INVESTIGAÇÃO do shadow-sync (fase 0, READ-ONLY no Firebird, não tocam o
+	// Postgres). Descobrem o INSERT mínimo do DownloadXML, o mecanismo da PK, a
+	// prevalência do multi-participação e validam a derivação de URL. Ver design/SHADOW-SYNC.md.
+	profileInsert := flag.Bool("profile-insert", false, "F0: perfila a TABLISTACHAVEACESSO (fill-rate por coluna, PK/trigger/generator, multi-participação, janela do robô) desde --since")
+	watchChave := flag.String("watch-chave", "", "F0: faz polling de UMA chave (44 díg.) e imprime/diffa a linha inteira a cada ciclo até Ctrl-C")
+	checkPath := flag.Bool("check-path", false, "F0: valida a derivação de URL (internal/syncpath) contra as URLs reais recentes, segmento a segmento")
+	checkPlans := flag.String("check-plans", "", "F1: compara o syncer-plans.jsonl (dry-run do syncer) com o que o DownloadXML gravou de verdade")
+	sample := flag.Int("sample", 2000, "profile-insert/check-path: nº máx. de linhas recentes amostradas")
+	watchInterval := flag.Int("watch-interval", 20, "watch-chave: intervalo de polling em segundos")
 	flag.Parse()
 
 	ctx := context.Background()
@@ -57,10 +66,6 @@ func main() {
 	if fbDSN == "" {
 		log.Fatal("TRACKER_FB_DSN é obrigatório")
 	}
-	pgDSN := os.Getenv("TRACKER_PG_DSN")
-	if pgDSN == "" {
-		log.Fatal("TRACKER_PG_DSN é obrigatório")
-	}
 
 	rd, err := firebird.NewReader(ctx, fbDSN)
 	if err != nil {
@@ -68,6 +73,27 @@ func main() {
 	}
 	defer rd.Close()
 
+	// Modos de investigação (fase 0): só Firebird read-only, sem Postgres. Saem antes
+	// de exigir/abrir o TRACKER_PG_DSN.
+	switch {
+	case *profileInsert:
+		runProfileInsert(ctx, rd, *since, *sample)
+		return
+	case *watchChave != "":
+		runWatchChave(ctx, rd, *watchChave, *watchInterval)
+		return
+	case *checkPath:
+		runCheckPath(ctx, rd, *since, *sample)
+		return
+	case *checkPlans != "":
+		runCheckPlans(ctx, rd, *checkPlans, *limit)
+		return
+	}
+
+	pgDSN := os.Getenv("TRACKER_PG_DSN")
+	if pgDSN == "" {
+		log.Fatal("TRACKER_PG_DSN é obrigatório")
+	}
 	pg, err := store.NewPostgres(ctx, pgDSN)
 	if err != nil {
 		log.Fatalf("postgres: %v", err)

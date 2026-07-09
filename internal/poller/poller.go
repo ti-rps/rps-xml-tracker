@@ -112,22 +112,19 @@ func (p *Poller) PollOnce(ctx context.Context) (Result, error) {
 		if !ok {
 			continue // ainda não chegou no Athenas — segue em trânsito
 		}
+		// M0: uma observação POR PARTICIPAÇÃO (empresa/filial), não mais só a
+		// representante — o derive agrega e a nota só termina quando TODAS
+		// terminam. Contadores seguem por NOTA (estado representante), como antes.
+		obs = append(obs, obsPorParticipacao(c, now, st)...)
 		switch {
 		case st.Importado:
-			obs = append(obs, importObs(c, model.EventImported, now, nil, st))
 			res.Imported++
 		case st.ImportIgnorada:
-			payload := map[string]any{}
-			if st.Motivo != "" {
-				payload["motivo"] = toUTF8(st.Motivo)
-			}
-			obs = append(obs, importObs(c, model.EventImportIgnored, now, payload, st))
 			res.Ignored++
 		default:
 			// achada no Athenas mas IMPORTADO=0 e não ignorada -> aguardando
 			// importação. Sinal não-terminal: dedup colapsa as reemissões a
 			// cada ciclo, então pending_at fica no 1º avistamento.
-			obs = append(obs, importObs(c, model.EventSeenPending, now, nil, st))
 			res.Pending++
 		}
 	}
@@ -184,17 +181,24 @@ func (p *Poller) RepollImportIgnored(ctx context.Context, fixPending bool) (Repo
 			case !ok:
 				res.NotFound++
 			case st.Importado:
-				obs = append(obs, importObs(c, model.EventImported, now, nil, st))
+				obs = append(obs, obsPorParticipacao(c, now, st)...)
 				res.Corrected++
 			case st.ImportIgnorada:
 				res.StillIgnored++
 			case fixPending:
 				// pendente de fato (dona ainda não importou): a import_ignored era de
-				// terceiro. Remove a observação errada e emite seen_pending.
+				// terceiro. Remove a observação errada e emite as participações —
+				// MENOS as ignoradas, senão recriaríamos na hora o que acabamos de
+				// apagar (a participação ignorada do terceiro volta go-forward, no
+				// próximo poll normal, já no modelo agregado que não termina a nota).
 				if _, err := p.st.DeleteImportIgnoredObs(ctx, c); err != nil {
 					return res, err
 				}
-				obs = append(obs, importObs(c, model.EventSeenPending, now, nil, st))
+				for _, o := range obsPorParticipacao(c, now, st) {
+					if o.EventType != model.EventImportIgnored {
+						obs = append(obs, o)
+					}
+				}
 				res.FixedPending++
 			default:
 				res.StillPending++
@@ -319,21 +323,16 @@ func (p *Poller) SweepOnce(ctx context.Context, since time.Time) (SweepResult, e
 		if !ok {
 			continue // sumiu entre o sweep e o lookup — a rotação recaptura
 		}
+		// M0: emite POR PARTICIPAÇÃO; contadores por nota (estado representante).
+		obs = append(obs, obsPorParticipacao(c, now, st)...)
 		switch {
 		case st.Importado:
-			obs = append(obs, importObs(c, model.EventImported, now, nil, st))
 			res.Imported++
 		case st.ImportIgnorada:
-			payload := map[string]any{}
-			if st.Motivo != "" {
-				payload["motivo"] = toUTF8(st.Motivo)
-			}
-			obs = append(obs, importObs(c, model.EventImportIgnored, now, payload, st))
 			res.Ignored++
 		default:
 			// há linha pendente (a dona ainda vai importar) -> NÃO é terminal;
 			// registra o avistamento e segue em rotação.
-			obs = append(obs, importObs(c, model.EventSeenPending, now, nil, st))
 			res.Pending++
 		}
 	}
@@ -393,13 +392,16 @@ func (p *Poller) ReconcileOnce(ctx context.Context, window, grace time.Duration,
 	}
 	sort.Strings(chaves) // amostra de faltantes determinística entre ciclos
 
-	statuses, err := p.st.StatusForChaves(ctx, chaves)
+	// KnownImported, não StatusForChaves: no modelo M0 uma nota "importada 1/2"
+	// (participação de outra empresa ainda pendente) tem status pending_import mas
+	// JÁ registrou a importação — pelo status ela contaria como faltante eterna.
+	known, err := p.st.KnownImported(ctx, chaves)
 	if err != nil {
 		return res, err
 	}
 	var missing []string
 	for _, c := range chaves {
-		if statuses[c] != model.StatusImported {
+		if !known[c] {
 			missing = append(missing, c)
 		}
 	}
@@ -513,7 +515,9 @@ func (p *Poller) EmitImportedFor(ctx context.Context, chaves []string) (accepted
 			continue // o Athenas não confirma imported -> não força
 		}
 		confirmed++
-		obs = append(obs, importObs(c, model.EventImported, now, nil, st))
+		// emite todas as participações (a importada + as ainda pendentes/ignoradas):
+		// registra a verdade completa, não só a correção pontual.
+		obs = append(obs, obsPorParticipacao(c, now, st)...)
 	}
 	if len(obs) == 0 {
 		return 0, confirmed, nil
@@ -522,17 +526,67 @@ func (p *Poller) EmitImportedFor(ctx context.Context, chaves []string) (accepted
 	return acc, confirmed, err
 }
 
-func importObs(chave, event string, now time.Time, payload map[string]any, st firebird.ImportState) model.Observation {
+// obsPorParticipacao monta as observações de UM lookup: uma POR PARTICIPAÇÃO
+// (linha empresa/filial do Athenas), cada qual com o evento do SEU estado —
+// imported, import_ignored (payload motivo) ou seen_pending (M0). O dedup_key
+// carrega a empresa (store.DedupKey), então as participações não colidem entre
+// si nem entre ciclos. Linha órfã sem CODIGOEMPRESA (não ancora participação):
+// cai numa única observação com o estado representante (selectState), como antes.
+func obsPorParticipacao(chave string, now time.Time, st firebird.ImportState) []model.Observation {
+	parts := st.Participacoes()
+	if len(parts) == 0 {
+		return []model.Observation{obsForRow(chave, now, representanteRow(st), st)}
+	}
+	out := make([]model.Observation, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, obsForRow(chave, now, p, st))
+	}
+	return out
+}
+
+// representanteRow reconstrói uma EmpresaImport com o estado/metadados do
+// representante (selectState) — só usado no fallback sem participações.
+func representanteRow(st firebird.ImportState) firebird.EmpresaImport {
+	return firebird.EmpresaImport{
+		CodigoEmpresa:  st.CodigoEmpresa,
+		CodigoFilial:   st.CodigoFilial,
+		NomeEmpresa:    st.NomeEmpresa,
+		Importado:      st.Importado,
+		ImportIgnorada: st.ImportIgnorada,
+		Motivo:         st.Motivo,
+		CnpjFilial:     st.CnpjFilial,
+		DataRobo:       st.DataRobo,
+		DataInclusao:   st.DataInclusao,
+	}
+}
+
+// obsForRow monta a observação de UMA participação (linha empresa/filial).
+// Metadados da NOTA (partes, emissão, valor) vêm do estado resolvido st (que os
+// backfilla entre as linhas irmãs); os da PARTICIPAÇÃO (empresa, direção, datas
+// de importação) vêm da própria linha.
+func obsForRow(chave string, now time.Time, row firebird.EmpresaImport, st firebird.ImportState) model.Observation {
+	event := model.EventSeenPending
+	var payload map[string]any
+	switch {
+	case row.Importado:
+		event = model.EventImported
+	case row.ImportIgnorada:
+		event = model.EventImportIgnored
+		payload = map[string]any{}
+		if row.Motivo != "" {
+			payload["motivo"] = toUTF8(row.Motivo)
+		}
+	}
 	// ObservedAt = hora real da importação no Athenas, com fallback em cascata:
 	//   1. DATAROBO  — mais preciso (hora exata do robô em lote); NULL em importações manuais
 	//   2. DATAINCLUSAO — sempre preenchido (quando a linha entrou no Athenas); proxy razoável
 	//   3. now()     — hora de detecção pelo poller (fallback seguro)
 	observedAt := now
 	if event == model.EventImported {
-		if st.DataRobo != nil {
-			observedAt = *st.DataRobo
-		} else if st.DataInclusao != nil {
-			observedAt = *st.DataInclusao
+		if row.DataRobo != nil {
+			observedAt = *row.DataRobo
+		} else if row.DataInclusao != nil {
+			observedAt = *row.DataInclusao
 		}
 	}
 	return model.Observation{
@@ -545,17 +599,17 @@ func importObs(chave, event string, now time.Time, payload map[string]any, st fi
 		Payload:     payload,
 		// enriquece com os dados da linha do Athenas (código do cliente + partes).
 		// strings sanitizadas: o Firebird (charset=NONE) devolve Latin-1, inválido em UTF-8.
-		CodigoEmpresa:    st.CodigoEmpresa,
-		CodigoFilial:     st.CodigoFilial,
-		NomeEmpresa:      toUTF8(st.NomeEmpresa),
+		CodigoEmpresa:    row.CodigoEmpresa,
+		CodigoFilial:     row.CodigoFilial,
+		NomeEmpresa:      toUTF8(row.NomeEmpresa),
 		CnpjEmitente:     toUTF8(st.CnpjEmitente),
 		NomeEmitente:     toUTF8(st.NomeEmitente),
 		CnpjDestinatario: toUTF8(st.CnpjDestinatario),
 		NomeDestinatario: toUTF8(st.NomeDestinatario),
 		DataEmissao:      st.DataEmissao,
 		ValorTotal:       st.ValorTotal,
-		// direção = lado da empresa: raiz do CNPJ da filial (Athenas) vs emitente/
+		// direção = lado DESTA empresa: raiz do CNPJ da filial da linha vs emitente/
 		// destinatário. CNPJ é numérico (sem acento), não precisa transcodificar.
-		Direction: model.DirectionFromCNPJs(st.CnpjFilial, st.CnpjEmitente, st.CnpjDestinatario),
+		Direction: model.DirectionFromCNPJs(row.CnpjFilial, st.CnpjEmitente, st.CnpjDestinatario),
 	}
 }

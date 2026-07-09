@@ -99,11 +99,7 @@ func (p *Postgres) AppendObservations(ctx context.Context, obs []model.Observati
 	}
 
 	for chave := range affected {
-		spans, err := loadObservations(ctx, tx, chave)
-		if err != nil {
-			return 0, 0, err
-		}
-		if err := upsertNota(ctx, tx, derive.Nota(chave, spans)); err != nil {
+		if err := recompute(ctx, tx, chave); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -112,6 +108,47 @@ func (p *Postgres) AppendObservations(ctx context.Context, obs []model.Observati
 		return 0, 0, err
 	}
 	return accepted, rejected, nil
+}
+
+// recompute re-deriva a nota e materializa as participações (nota_empresa) a
+// partir das observações, na MESMA transação da mudança que o disparou. Toda
+// mutação de observações passa por aqui para os dois derivados nunca divergirem.
+func recompute(ctx context.Context, tx pgx.Tx, chave string) error {
+	spans, err := loadObservations(ctx, tx, chave)
+	if err != nil {
+		return err
+	}
+	if len(spans) == 0 {
+		return nil
+	}
+	n, parts := derive.NotaParticipacoes(chave, spans)
+	if err := upsertNota(ctx, tx, n); err != nil {
+		return err
+	}
+	return replaceParticipacoes(ctx, tx, chave, parts)
+}
+
+// replaceParticipacoes substitui as participações materializadas da chave
+// (delete+insert: são 1-3 linhas e o conjunto pode encolher numa correção
+// destrutiva, ex. DeleteImportIgnoredObs). first_seen_at é preservado no upsert
+// implícito pela recriação com o pending_at derivado (imutável nas observações).
+func replaceParticipacoes(ctx context.Context, tx pgx.Tx, chave string, parts []model.Participacao) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM nota_empresa WHERE chave_acesso=$1`, chave); err != nil {
+		return err
+	}
+	for _, p := range parts {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO nota_empresa
+			  (chave_acesso, codigo_empresa, codigo_filial, empresa_nome, papel, direction,
+			   status, motivo_ignorado, pending_at, imported_at, synced_at, sync_url, last_update_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7::nota_status,$8,$9,$10,$11,$12,now())`,
+			chave, p.CodigoEmpresa, p.CodigoFilial, nullStr(p.NomeEmpresa), nullStr(p.Papel),
+			nullStr(p.Direction), string(p.Status), nullStr(p.MotivoIgnorado),
+			p.PendingAt, p.ImportedAt, p.SyncedAt, nullStr(p.SyncURL)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (p *Postgres) GetNota(ctx context.Context, chave string) (model.NotaDetail, bool, error) {
@@ -126,7 +163,10 @@ func (p *Postgres) GetNota(ctx context.Context, chave string) (model.NotaDetail,
 	if err != nil {
 		return model.NotaDetail{}, false, err
 	}
-	return model.NotaDetail{Nota: n, Spans: spans}, true, nil
+	// participações derivadas das observações (não da nota_empresa): funciona também
+	// para notas antigas ainda não re-derivadas (backfill go-forward) e dispensa
+	// uma query extra — as observações já estão na mão.
+	return model.NotaDetail{Nota: n, Spans: spans, Participacoes: derive.Participacoes(spans)}, true, nil
 }
 
 // notaWhere monta as condições WHERE (numeradas $1..$N) a partir do NotaFilter.
@@ -394,14 +434,8 @@ func (p *Postgres) DeleteImportIgnoredObs(ctx context.Context, chave string) (in
 	n := int(tag.RowsAffected())
 	if n > 0 {
 		// recomputa a nota a partir das observações restantes (volta a synced).
-		spans, err := loadObservations(ctx, tx, chave)
-		if err != nil {
+		if err := recompute(ctx, tx, chave); err != nil {
 			return 0, err
-		}
-		if len(spans) > 0 {
-			if err := upsertNota(ctx, tx, derive.Nota(chave, spans)); err != nil {
-				return 0, err
-			}
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -411,9 +445,11 @@ func (p *Postgres) DeleteImportIgnoredObs(ctx context.Context, chave string) (in
 }
 
 func (p *Postgres) ListChavesImportedSince(ctx context.Context, since time.Time) ([]string, error) {
+	// por imported_at, não por status: no modelo M0 uma nota "importada 1/2" fica
+	// pending_import (participação pendente) mas TEM importação a corrigir.
 	rows, err := p.pool.Query(ctx,
 		`SELECT chave_acesso FROM notas
-		 WHERE status='imported'::nota_status AND imported_at >= $1
+		 WHERE imported_at >= $1
 		 ORDER BY imported_at`, since)
 	if err != nil {
 		return nil, err
@@ -450,14 +486,8 @@ func (p *Postgres) UpdateImportedObservedAt(ctx context.Context, chave string, o
 		return false, tx.Commit(ctx) // nada a corrigir
 	}
 	// re-deriva a nota (imported_at acompanha o novo observed_at).
-	spans, err := loadObservations(ctx, tx, chave)
-	if err != nil {
+	if err := recompute(ctx, tx, chave); err != nil {
 		return false, err
-	}
-	if len(spans) > 0 {
-		if err := upsertNota(ctx, tx, derive.Nota(chave, spans)); err != nil {
-			return false, err
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
@@ -921,11 +951,47 @@ func (p *Postgres) StatusForChaves(ctx context.Context, chaves []string) (map[st
 	return out, nil
 }
 
-// ImportedChavesBetween retorna as chaves com status=imported cujo imported_at cai na
-// janela [since, until), opcionalmente de uma empresa. É o lado "tracker" do reconcile
-// por TABLISTACHAVEACESSO (mesma janela de DATAINCLUSAO no Athenas).
+// KnownImported reporta quais das chaves dadas têm imported_at não-nulo (≥1
+// participação importada). Ver o comentário na interface: é o teste do reconcile
+// no modelo M0 — o status agregado seguraria "importada 1/2" como faltante eterna.
+func (p *Postgres) KnownImported(ctx context.Context, chaves []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(chaves))
+	const chunk = 1000
+	for start := 0; start < len(chaves); start += chunk {
+		end := start + chunk
+		if end > len(chaves) {
+			end = len(chaves)
+		}
+		rows, err := p.pool.Query(ctx,
+			`SELECT chave_acesso FROM notas
+			 WHERE chave_acesso = ANY($1) AND imported_at IS NOT NULL`, chaves[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[c] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
+// ImportedChavesBetween retorna as chaves com importação registrada (imported_at
+// não-nulo — no M0, "importada 1/2" fica pending_import mas JÁ importou p/ alguma
+// empresa) cujo imported_at cai na janela [since, until), opcionalmente de uma
+// empresa. É o lado "tracker" do reconcile por TABLISTACHAVEACESSO (mesma janela
+// de DATAINCLUSAO no Athenas).
 func (p *Postgres) ImportedChavesBetween(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) ([]string, error) {
-	q := `SELECT chave_acesso FROM notas WHERE status='imported' AND imported_at >= $1 AND imported_at < $2`
+	q := `SELECT chave_acesso FROM notas WHERE imported_at >= $1 AND imported_at < $2`
 	args := []any{since, until}
 	if codigoEmpresa != nil {
 		args = append(args, *codigoEmpresa)

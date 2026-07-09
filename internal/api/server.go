@@ -147,7 +147,14 @@ func (s *Server) handleAgentHeartbeat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "json inválido"})
 		return
 	}
-	if err := s.st.UpsertHeartbeat(c.Request.Context(), "agent", payload); err != nil {
+	// F1: o mesmo endpoint atende agente E syncer (mesmo HMAC). O remetente diz
+	// quem é via payload["service"]; allowlist fechada — default "agent" preserva
+	// os agentes já implantados, que não mandam o campo.
+	service := "agent"
+	if v, ok := payload["service"].(string); ok && v == "syncer" {
+		service = v
+	}
+	if err := s.st.UpsertHeartbeat(c.Request.Context(), service, payload); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

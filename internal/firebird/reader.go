@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -468,6 +469,62 @@ func selectState(chave string, rows []EmpresaImport) ImportState {
 	}
 	applyMeta(&st, rep, rows)
 	return st
+}
+
+// Participacoes resolve Rows em UMA linha por participação (empresa, filial),
+// para o poller emitir observação por participação (M0). A tabela tem duplicatas
+// genuínas até dentro da mesma empresa/filial (medido em F0); dentro de uma
+// participação a resolução é: importou > pendente > ignorada (se a empresa tem
+// uma linha importada, ela importou — as demais são cópias/resíduo). Linhas sem
+// CODIGOEMPRESA não ancoram participação e ficam de fora (o estado representante
+// da nota continua vindo do selectState). Ordenação estável por (empresa, filial).
+func (st ImportState) Participacoes() []EmpresaImport {
+	type key struct{ emp, fil int }
+	best := map[key]EmpresaImport{}
+	for _, r := range st.Rows {
+		if r.CodigoEmpresa == nil {
+			continue
+		}
+		k := key{*r.CodigoEmpresa, 0}
+		if r.CodigoFilial != nil {
+			k.fil = *r.CodigoFilial
+		}
+		cur, seen := best[k]
+		if !seen || partRank(r) > partRank(cur) {
+			best[k] = r
+		}
+	}
+	out := make([]EmpresaImport, 0, len(best))
+	for _, r := range best {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if *out[i].CodigoEmpresa != *out[j].CodigoEmpresa {
+			return *out[i].CodigoEmpresa < *out[j].CodigoEmpresa
+		}
+		return derefOr0(out[i].CodigoFilial) < derefOr0(out[j].CodigoFilial)
+	})
+	return out
+}
+
+// partRank ordena os estados de uma MESMA participação: importada vence (fato
+// consumado), pendente antes de ignorada (ainda pode importar).
+func partRank(e EmpresaImport) int {
+	switch {
+	case e.Importado:
+		return 2
+	case !e.ImportIgnorada:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func derefOr0(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // lowestCodigo returns the matching row with the smallest CODIGOEMPRESA (nil

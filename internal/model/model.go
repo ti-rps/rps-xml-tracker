@@ -99,6 +99,14 @@ const (
 	EventSeenPending   = "seen_pending"   // visto no Athenas, IMPORTADO=0 (aguardando importação)
 	EventImported      = "imported"       // IMPORTADO 0->1 detectado
 	EventImportIgnored = "import_ignored" // IMPORTACAOIGNORADA=1
+
+	// Eventos do SYNCER (shadow-sync F1), stage sync, POR PARTICIPAÇÃO. Só
+	// sync_moved é progresso (seta SyncedAt, como file_moved); os outros dois são
+	// só timeline. O file_moved do AGENTE continua existindo e é a confirmação
+	// INDEPENDENTE do sync_moved (o agente não sabe que o syncer existe).
+	EventSyncMoved      = "sync_moved"       // rename no SINCRONIZADO concluído (payload: url, origem)
+	EventSyncDBInserted = "sync_db_inserted" // INSERT na TABLISTACHAVEACESSO ok (payload: codigo_chaveacesso)
+	EventSyncFailed     = "sync_failed"      // falha em qualquer passo (payload: passo, erro)
 )
 
 // Observation is one immutable, append-only signal about a nota, from any source.
@@ -160,10 +168,32 @@ type Nota struct {
 	LatSyncImportS  *int64 `json:"lat_sync_import_s,omitempty"`
 }
 
-// NotaDetail adds the full span timeline to a Nota.
+// Participacao é o envolvimento de UMA empresa cliente (empresa/filial) numa nota.
+// A TABLISTACHAVEACESSO tem uma linha por participação — emitente (saída p/ A) e
+// destinatário (entrada p/ B) têm cada um seu PRÓPRIO ciclo de importação (M0,
+// shadow-sync §0). Derivada das observações de stage import/sync que carregam a
+// empresa; o status aqui é o da PARTICIPAÇÃO, não o agregado da nota.
+type Participacao struct {
+	CodigoEmpresa  int        `json:"codigo_empresa"`
+	CodigoFilial   int        `json:"codigo_filial"` // 0 = desconhecida na linha do Athenas
+	NomeEmpresa    string     `json:"nome_empresa,omitempty"`
+	Papel          string     `json:"papel,omitempty"`     // emitente | destinatario
+	Direction      string     `json:"direction,omitempty"` // saida | entrada
+	Status         NotaStatus `json:"status"`              // pending_import | imported | import_ignored
+	MotivoIgnorado string     `json:"motivo_ignorado,omitempty"`
+	PendingAt      *time.Time `json:"pending_at,omitempty"`
+	ImportedAt     *time.Time `json:"imported_at,omitempty"`
+	SyncedAt       *time.Time `json:"synced_at,omitempty"` // F1: sync da CÓPIA desta empresa
+	SyncURL        string     `json:"sync_url,omitempty"`  // F1: URL relativa da cópia
+}
+
+// NotaDetail adds the full span timeline (and per-empresa participações) to a Nota.
 type NotaDetail struct {
 	Nota
 	Spans []Observation `json:"spans"`
+	// Participacoes: uma entrada por empresa envolvida. Vazio em notas antigas ainda
+	// não re-derivadas (backfill go-forward) e nas que não chegaram ao Athenas.
+	Participacoes []Participacao `json:"participacoes"`
 }
 
 // NotaSummary é o agregado do conjunto que casa um filtro (mesmos filtros do GET /notas):
