@@ -136,9 +136,15 @@ func reconcileEntradaSaida(ctx context.Context, rd *firebird.Reader, pg *store.P
 	if err != nil {
 		log.Fatalf("reconcile: status no tracker: %v", err)
 	}
+	// faltante = sem NENHUMA importação registrada (imported_at). O status agregado
+	// não serve de teste: "importada 1/2" (M0) fica pending_import mas já importou.
+	known, err := pg.KnownImported(ctx, comChave)
+	if err != nil {
+		log.Fatalf("reconcile: known-imported no tracker: %v", err)
+	}
 	var missing []string
 	for _, c := range comChave {
-		if statuses[c] != model.StatusImported {
+		if !known[c] {
 			missing = append(missing, c)
 		}
 	}

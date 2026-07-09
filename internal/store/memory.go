@@ -56,7 +56,8 @@ func (m *Memory) GetNota(_ context.Context, chave string) (model.NotaDetail, boo
 	if len(spans) == 0 {
 		return model.NotaDetail{}, false, nil
 	}
-	return model.NotaDetail{Nota: derive.Nota(chave, spans), Spans: spans}, true, nil
+	n, parts := derive.NotaParticipacoes(chave, spans)
+	return model.NotaDetail{Nota: n, Spans: spans, Participacoes: parts}, true, nil
 }
 
 func (m *Memory) ListNotas(_ context.Context, f NotaFilter) ([]model.Nota, int, error) {
@@ -195,6 +196,23 @@ func (m *Memory) StatusForChaves(_ context.Context, chaves []string) (map[string
 	for _, n := range m.allNotas() {
 		if _, ok := want[n.ChaveAcesso]; ok {
 			out[n.ChaveAcesso] = n.Status
+		}
+	}
+	return out, nil
+}
+
+// KnownImported espelha o Postgres: imported_at não-nulo (≥1 participação importada).
+func (m *Memory) KnownImported(_ context.Context, chaves []string) (map[string]bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	want := make(map[string]struct{}, len(chaves))
+	for _, c := range chaves {
+		want[c] = struct{}{}
+	}
+	out := make(map[string]bool, len(chaves))
+	for _, n := range m.allNotas() {
+		if _, ok := want[n.ChaveAcesso]; ok && n.ImportedAt != nil {
+			out[n.ChaveAcesso] = true
 		}
 	}
 	return out, nil

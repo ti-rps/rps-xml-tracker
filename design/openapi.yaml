@@ -92,6 +92,29 @@ components:
         - type: object
           properties:
             spans: { type: array, items: { $ref: '#/components/schemas/Span' } }
+            participacoes:
+              type: array
+              description: >
+                M0: uma entrada por empresa cliente envolvida na chave (emitente=saída,
+                destinatário=entrada), cada uma com seu PRÓPRIO ciclo de importação no
+                Athenas. O status da nota é o agregado: só termina quando todas as
+                participações terminam. Vazio em notas antigas ainda não re-derivadas
+                (backfill go-forward).
+              items: { $ref: '#/components/schemas/Participacao' }
+    Participacao:
+      type: object
+      properties:
+        codigo_empresa:  { type: integer }
+        codigo_filial:   { type: integer, description: "0 = desconhecida na linha do Athenas" }
+        nome_empresa:    { type: string, nullable: true }
+        papel:           { type: string, enum: [emitente, destinatario], nullable: true }
+        direction:       { type: string, enum: [saida, entrada], nullable: true }
+        status:          { type: string, enum: [pending_import, imported, import_ignored, synced] }
+        motivo_ignorado: { type: string, nullable: true }
+        pending_at:      { type: string, format: date-time, nullable: true }
+        imported_at:     { type: string, format: date-time, nullable: true }
+        synced_at:       { type: string, format: date-time, nullable: true, description: "F1: quando a CÓPIA desta empresa foi posicionada pelo syncer" }
+        sync_url:        { type: string, nullable: true, description: "F1: URL relativa da cópia desta empresa" }
     EmpresaRef:
       type: object
       properties:

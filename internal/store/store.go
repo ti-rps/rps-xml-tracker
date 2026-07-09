@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
@@ -51,6 +52,13 @@ type Store interface {
 	// o tracker por imported_at, cuja granularidade é de DATA (DATAROBO/DATAINCLUSAO
 	// vêm com hora 00:00) e não casa com janela rolante de relógio.
 	StatusForChaves(ctx context.Context, chaves []string) (map[string]model.NotaStatus, error)
+
+	// KnownImported reporta quais das chaves dadas já têm ALGUMA importação registrada
+	// (imported_at não-nulo). É o teste correto do reconcile no modelo M0: o STATUS
+	// agregado não serve, porque "importada 1/2" (uma participação importou, outra
+	// pende) fica pending_import até todas terminarem — pelo status, essas chaves
+	// contariam como "faltando" para sempre. Ausentes não aparecem no mapa.
+	KnownImported(ctx context.Context, chaves []string) (map[string]bool, error)
 
 	// UpdateImportedObservedAt reescreve o observed_at da observação 'imported' de uma
 	// chave (e re-deriva a nota) quando difere do valor dado; retorna se mudou.
@@ -198,7 +206,20 @@ func dateColumn(field string) string {
 }
 
 // DedupKey is the idempotency key for an observation: same source+stage+event+
-// chave+file_hash never stored twice.
+// chave+file_hash never stored twice. M0: observações que carregam empresa
+// (poller/syncer) ganham o sufixo empresa/filial — cada PARTICIPAÇÃO tem seu
+// próprio ciclo, então "imported da empresa A" e "seen_pending da empresa B"
+// coexistem para a mesma chave. Efeito colateral único e aceito: a primeira
+// reemissão pós-deploy de um seen_pending antigo é aceita de novo (chave nova);
+// o derive colapsa por setIfEarlier, então nada muda no estado.
 func DedupKey(o model.Observation) string {
-	return o.Source + "|" + string(o.Stage) + "|" + o.EventType + "|" + o.ChaveAcesso + "|" + o.FileHash
+	k := o.Source + "|" + string(o.Stage) + "|" + o.EventType + "|" + o.ChaveAcesso + "|" + o.FileHash
+	if o.CodigoEmpresa != nil {
+		fil := 0
+		if o.CodigoFilial != nil {
+			fil = *o.CodigoFilial
+		}
+		k += "|" + strconv.Itoa(*o.CodigoEmpresa) + "/" + strconv.Itoa(fil)
+	}
+	return k
 }

@@ -12,6 +12,17 @@
 > (cnpj/competência/arquivo/direção 100% NFe/NFCe/CTe; empresa 98%),
 > multi-participação = 12% (uma cópia por empresa/filial → M0 confirmado),
 > gotcha da trigger `CHECK_FORCAIMPORTACAO`, e o achado colateral DATAROBO=NULL.
+>
+> **M0 — CONCLUÍDA (2026-07-09):** migração 00015 (`nota_empresa`, vazia no boot —
+> backfill go-forward via recompute), poller emite observação POR PARTICIPAÇÃO
+> (dedup_key ganha empresa/filial), derive agrega ("importada 1/2" fica
+> pending_import até TODAS terminarem), `GET /notas/{chave}` ganha
+> `participacoes[]`. Reconcile migrado de status→`KnownImported` (imported_at),
+> senão "1/2" viraria faltante eterna. Filtros de LISTA seguem na `notas`
+> (representante) até o backfill retroativo — follow-up documentado abaixo.
+> Notas ao deploy: (1) a 1ª reemissão de seen_pending pós-deploy é aceita de novo
+> (chave de dedup nova) — ruído único e inofensivo na timeline; (2) notas já
+> terminais NÃO reabrem (recompute só acontece em observação nova aceita).
 
 ## 0. Pré-requisito de modelagem: participação por empresa (nota_empresa)
 
