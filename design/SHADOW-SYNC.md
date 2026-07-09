@@ -4,12 +4,14 @@
 > pode mover ASINCRONIZAR → SINCRONIZADO e inserir na TABLISTACHAVEACESSO com
 > IMPORTADO=0; o AthenasHorse segue dono da importação.
 >
-> **F0 — código implementado (2026-07-09):** `internal/syncpath` (derivação pura +
-> testes), `internal/firebird/investigate.go` (SELECTs read-only de apoio) e os
-> modos `repoll --profile-insert / --watch-chave / --check-path`. Falta rodar contra
-> o Firebird de prod para produzir o entregável de dados (INSERT mínimo, acerto da
-> derivação, marcador, prevalência multi-participação). Rodar via
-> `docker compose run --rm tracker-poller tracker-repoll --profile-insert --since ...`.
+> **F0 — CONCLUÍDA (2026-07-09):** código (`internal/syncpath`,
+> `internal/firebird/investigate.go`, modos `repoll --profile-insert /
+> --watch-chave / --check-path`) + investigação rodada contra o Firebird de prod.
+> Entregável em **`design/SHADOW-SYNC-F0-ACHADOS.md`**: PK via generator
+> `GEN_CHAVEACESSOXML`, INSERT mínimo, derivação de URL validada em 5.000 URLs
+> (cnpj/competência/arquivo/direção 100% NFe/NFCe/CTe; empresa 98%),
+> multi-participação = 12% (uma cópia por empresa/filial → M0 confirmado),
+> gotcha da trigger `CHECK_FORCAIMPORTACAO`, e o achado colateral DATAROBO=NULL.
 
 ## 0. Pré-requisito de modelagem: participação por empresa (nota_empresa)
 

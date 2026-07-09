@@ -106,14 +106,25 @@ func Competencia(dataEmissao string) (string, error) {
 	return comp, nil
 }
 
-// SanitizeSegment remove o que o NTFS não aceita num nome de diretório: os
-// caracteres reservados (< > : " / \ | ? *), controles (0x00-0x1F) e ponto/espaço
-// finais. Remoção seca, sem substituto — se o DownloadXML fizer diferente (ex.:
-// "S/A" virar "S A"), o --check-path acusa e ajustamos aqui com caso de teste.
+// SanitizeSegment reproduz como o DownloadXML monta o nome da pasta da empresa a
+// partir de TABEMPRESAS.NOME. Regras confirmadas empiricamente no repoll
+// --check-path (5000 URLs reais, jul/2026):
+//   - "&" vira "e" (ex.: NOME "J MARCOS ALVES TRINDADE & CIA LTDA" -> pasta
+//     "...TRINDADE e CIA LTDA");
+//   - caracteres reservados do NTFS (< > : " / \ | ? *) e controles (0x00-0x1F)
+//     são removidos;
+//   - ponto/espaço finais são cortados (NTFS não os mantém).
+//
+// Divergências residuais (~1-2%) são notas cuja pasta foi criada com um NOME que
+// depois foi editado na TABEMPRESAS — não são erro de derivação (go-forward casa
+// o NOME vigente). Se o --check-path revelar outra transformação, ela entra aqui
+// com um caso de teste usando a URL real.
 func SanitizeSegment(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
+		case r == '&':
+			b.WriteRune('e')
 		case r < 0x20:
 		case strings.ContainsRune(`<>:"/\|?*`, r):
 		default:

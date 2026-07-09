@@ -84,6 +84,7 @@ func TestDeriveErros(t *testing.T) {
 func TestSanitizeSegment(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"GESTAO BEACH LTDA", "GESTAO BEACH LTDA"},
+		{"J MARCOS ALVES TRINDADE & CIA LTDA", "J MARCOS ALVES TRINDADE e CIA LTDA"}, // & -> e (URL real)
 		{"AUTO POSTO S/A", "AUTO POSTO SA"},
 		{"EMPRESA LTDA.", "EMPRESA LTDA"},
 		{"  EMPRESA  ", "EMPRESA"},
