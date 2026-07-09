@@ -665,6 +665,65 @@ func (r *Reader) PendingVsImported(ctx context.Context, emissaoSince time.Time) 
 	return out, rows.Err()
 }
 
+// ChaveURLRow é a visão enxuta de uma linha p/ o --check-plans: quem o
+// DownloadXML criou (empresa/filial), com que URL, e se já importou.
+type ChaveURLRow struct {
+	Chave         string
+	CodigoEmpresa *int
+	CodigoFilial  *int
+	URL           string
+	Importado     bool
+}
+
+// URLsByChaves retorna as linhas (todas as participações) das chaves dadas, só
+// com as colunas que o diff plano×realidade precisa. Chunked, READ-ONLY.
+func (r *Reader) URLsByChaves(ctx context.Context, chaves []string) (map[string][]ChaveURLRow, error) {
+	out := make(map[string][]ChaveURLRow, len(chaves))
+	for start := 0; start < len(chaves); start += chunkSize {
+		end := min(start+chunkSize, len(chaves))
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
+		args := make([]any, 0, end-start)
+		for _, c := range chaves[start:end] {
+			args = append(args, c)
+		}
+		rows, err := r.db.QueryContext(ctx, `
+			SELECT CHAVEACESSO, CODIGOEMPRESA, CODIGOFILIAL, URL, IMPORTADO
+			FROM TABLISTACHAVEACESSO WHERE CHAVEACESSO IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var chave string
+			var ce, cf, imp sql.NullInt64
+			var url sql.NullString
+			if err := rows.Scan(&chave, &ce, &cf, &url, &imp); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			row := ChaveURLRow{
+				Chave:     strings.TrimSpace(chave),
+				URL:       toUTF8(trimNull(url)),
+				Importado: imp.Valid && imp.Int64 == 1,
+			}
+			if ce.Valid {
+				v := int(ce.Int64)
+				row.CodigoEmpresa = &v
+			}
+			if cf.Valid {
+				v := int(cf.Int64)
+				row.CodigoFilial = &v
+			}
+			out[row.Chave] = append(out[row.Chave], row)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // ValueCount é um valor distinto de uma coluna + quantas linhas o têm.
 type ValueCount struct {
 	Value *string // nil = NULL

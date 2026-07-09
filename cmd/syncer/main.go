@@ -17,6 +17,10 @@
 // Config (env):
 //
 //	TRACKER_SYNCER_ENABLED      "true" para o binário rodar (default: sai na hora)
+//	TRACKER_SYNCER_DRY_RUN      default "true" — o modo REAL exige explicitamente
+//	                            "false". O serviço Windows roda SEM flags, então o
+//	                            dry-run tem de ser o default por env: um install
+//	                            sem a variável nunca pode escrever por omissão.
 //	TRACKER_API_URL             API do tracker (observações + heartbeat)
 //	TRACKER_AGENT_SECRET        segredo HMAC do ingest (o mesmo do agente)
 //	TRACKER_FB_DSN              Firebird READ-ONLY (resolução + pre-checks)
@@ -237,12 +241,17 @@ func postHeartbeat(ctx context.Context, apiURL, secret, name string, payload map
 }
 
 func main() {
-	dryRun := flag.Bool("dry-run", false, "só planeja e registra o plano; nenhuma escrita (modo da F1)")
+	dryRunFlag := flag.Bool("dry-run", false, "força o dry-run (planeja e registra; nenhuma escrita)")
 	chave := flag.String("chave", "", "sincroniza SÓ esta chave (44 dígitos; exige --file)")
 	file := flag.String("file", "", "caminho do XML na ASINCRONIZAR (com --chave)")
 	once := flag.Bool("once", false, "uma varredura e sai")
 	allowStale := flag.Bool("allow-stale", false, "permite emissão fora da janela do AthenasHorse (mês atual+anterior)")
 	flag.Parse()
+
+	// Dry-run é o DEFAULT: o modo real exige TRACKER_SYNCER_DRY_RUN=false
+	// EXPLÍCITO (além do ENABLED). Como serviço o processo roda sem flags —
+	// a omissão tem de cair no modo inofensivo.
+	dryRun := *dryRunFlag || getenv("TRACKER_SYNCER_DRY_RUN", "true") != "false"
 
 	verb := flag.Arg(0)
 
@@ -284,13 +293,13 @@ func main() {
 
 	// Gatilho single-key (piloto F2): roda uma vez e sai, sem loop de serviço.
 	if *chave != "" {
-		prg.build(*dryRun, *allowStale)
+		prg.build(dryRun, *allowStale)
 		defer prg.closeAll()
 		plan, err := prg.sn.RunChave(prg.ctx, *chave, *file)
 		if err != nil {
 			log.Fatalf("chave %s: %v", *chave, err)
 		}
-		if *dryRun {
+		if dryRun {
 			log.Printf("dry-run concluído — plano com %d participação(ões) registrado; NADA foi escrito", len(plan.Participacoes))
 		} else {
 			log.Printf("sincronização da chave %s concluída (%d participação(ões))", *chave, len(plan.Participacoes))
@@ -298,7 +307,7 @@ func main() {
 		return
 	}
 
-	prg.build(*dryRun, *allowStale)
+	prg.build(dryRun, *allowStale)
 	if *once {
 		defer prg.closeAll()
 		prg.cycle()

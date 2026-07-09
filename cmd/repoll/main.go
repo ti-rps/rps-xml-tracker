@@ -55,6 +55,7 @@ func main() {
 	profileInsert := flag.Bool("profile-insert", false, "F0: perfila a TABLISTACHAVEACESSO (fill-rate por coluna, PK/trigger/generator, multi-participação, janela do robô) desde --since")
 	watchChave := flag.String("watch-chave", "", "F0: faz polling de UMA chave (44 díg.) e imprime/diffa a linha inteira a cada ciclo até Ctrl-C")
 	checkPath := flag.Bool("check-path", false, "F0: valida a derivação de URL (internal/syncpath) contra as URLs reais recentes, segmento a segmento")
+	checkPlans := flag.String("check-plans", "", "F1: compara o syncer-plans.jsonl (dry-run do syncer) com o que o DownloadXML gravou de verdade")
 	sample := flag.Int("sample", 2000, "profile-insert/check-path: nº máx. de linhas recentes amostradas")
 	watchInterval := flag.Int("watch-interval", 20, "watch-chave: intervalo de polling em segundos")
 	flag.Parse()
@@ -83,6 +84,9 @@ func main() {
 		return
 	case *checkPath:
 		runCheckPath(ctx, rd, *since, *sample)
+		return
+	case *checkPlans != "":
+		runCheckPlans(ctx, rd, *checkPlans, *limit)
 		return
 	}
 

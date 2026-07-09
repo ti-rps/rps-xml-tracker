@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"os/signal"
@@ -508,6 +509,125 @@ func runCheckPath(ctx context.Context, rd *firebird.Reader, since string, sample
 	log.Printf("  eventos (TPEVENTO): %d | substitutas (CHAVEACESSOSUBS): %d | URL vazia após split: %d | formato inesperado: %d",
 		eventos, substitutas, semSegmentos, formatoInesperado)
 	log.Printf("=== fim do check-path ===")
+}
+
+// planFile espelha o JSON do syncer-plans.jsonl (dry-run do syncer, F1).
+type planFile struct {
+	Origem        string `json:"origem"`
+	Chave         string `json:"chave"`
+	DataEmissao   string `json:"data_emissao"`
+	Participacoes []struct {
+		CodigoEmpresa int    `json:"codigo_empresa"`
+		CodigoFilial  int    `json:"codigo_filial"`
+		DestRel       string `json:"dest_rel"`
+	} `json:"participacoes"`
+}
+
+// runCheckPlans fecha o loop da F1: compara os PLANOS do dry-run do syncer
+// (syncer-plans.jsonl, copiado do SRVIMPORT) com o que o DownloadXML FEZ de
+// verdade na TABLISTACHAVEACESSO depois — por chave: as mesmas participações
+// (empresa/filial)? a mesma URL? Divergência aqui é bug do nosso plano (ou
+// comportamento do DownloadXML que não modelamos) e PRECISA ser entendida
+// antes do piloto F2.
+func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit int) {
+	f, err := os.Open(path)
+	if err != nil {
+		log.Fatalf("check-plans: %v", err)
+	}
+	defer f.Close()
+	var plans []planFile
+	dec := json.NewDecoder(f)
+	for {
+		var p planFile
+		if err := dec.Decode(&p); err != nil {
+			break
+		}
+		if p.Chave != "" && len(p.Participacoes) > 0 {
+			plans = append(plans, p)
+		}
+	}
+	log.Printf("=== check-plans (READ-ONLY) — %d planos de %s ===", len(plans), path)
+	if len(plans) == 0 {
+		return
+	}
+	chaves := make([]string, 0, len(plans))
+	for _, p := range plans {
+		chaves = append(chaves, p.Chave)
+	}
+	real, err := rd.URLsByChaves(ctx, chaves)
+	if err != nil {
+		log.Fatalf("check-plans: firebird: %v", err)
+	}
+
+	var aindaNao, urlOK, urlDiff, partFaltando, partExtra, importadas int
+	var exDiff, exFalta []string
+	for _, p := range plans {
+		rows := real[p.Chave]
+		if len(rows) == 0 {
+			aindaNao++ // DownloadXML ainda não pegou essa — normal, re-rode depois
+			continue
+		}
+		byPart := map[string]firebird.ChaveURLRow{}
+		for _, r := range rows {
+			if r.CodigoEmpresa != nil {
+				k := strconv.Itoa(*r.CodigoEmpresa) + "/" + strconv.Itoa(derefInt0(r.CodigoFilial))
+				byPart[k] = r
+			}
+			if r.Importado {
+				importadas++
+			}
+		}
+		planned := map[string]bool{}
+		for _, part := range p.Participacoes {
+			k := strconv.Itoa(part.CodigoEmpresa) + "/" + strconv.Itoa(part.CodigoFilial)
+			planned[k] = true
+			r, ok := byPart[k]
+			if !ok {
+				partFaltando++
+				if len(exFalta) < 10 {
+					exFalta = append(exFalta, p.Chave+" emp "+k+" planejada mas o DownloadXML não criou a linha")
+				}
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(r.URL), strings.TrimSpace(part.DestRel)) {
+				urlOK++
+			} else {
+				urlDiff++
+				if len(exDiff) < 10 {
+					exDiff = append(exDiff, p.Chave+" emp "+k+"\n      plano: "+part.DestRel+"\n      real : "+r.URL)
+				}
+			}
+		}
+		for k := range byPart {
+			if !planned[k] {
+				partExtra++
+				if len(exFalta) < 10 {
+					exFalta = append(exFalta, p.Chave+" emp "+k+" criada pelo DownloadXML mas FORA do nosso plano")
+				}
+			}
+		}
+	}
+	log.Printf("planos ainda não sincronizados pelo DownloadXML: %d (re-rode mais tarde)", aindaNao)
+	log.Printf("participações: URL bate=%d, URL diverge=%d, planejada-sem-linha=%d, linha-fora-do-plano=%d",
+		urlOK, urlDiff, partFaltando, partExtra)
+	log.Printf("linhas já importadas pelo AthenasHorse: %d", importadas)
+	for _, e := range exDiff {
+		log.Printf("  ✗ URL: %s", e)
+	}
+	for _, e := range exFalta {
+		log.Printf("  ✗ participação: %s", e)
+	}
+	if urlDiff == 0 && partFaltando == 0 && partExtra == 0 && urlOK > 0 {
+		log.Printf("VEREDITO: %d participações comparadas, plano == realidade. Pronto p/ o piloto F2.", urlOK)
+	}
+	log.Printf("=== fim do check-plans ===")
+}
+
+func derefInt0(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func ratio(n, d int) string {
