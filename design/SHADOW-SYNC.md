@@ -3,6 +3,13 @@
 > Status: proposta (2026-07-08), aprovada a premissa pelo dono da Athenas: o tracker
 > pode mover ASINCRONIZAR → SINCRONIZADO e inserir na TABLISTACHAVEACESSO com
 > IMPORTADO=0; o AthenasHorse segue dono da importação.
+>
+> **F0 — código implementado (2026-07-09):** `internal/syncpath` (derivação pura +
+> testes), `internal/firebird/investigate.go` (SELECTs read-only de apoio) e os
+> modos `repoll --profile-insert / --watch-chave / --check-path`. Falta rodar contra
+> o Firebird de prod para produzir o entregável de dados (INSERT mínimo, acerto da
+> derivação, marcador, prevalência multi-participação). Rodar via
+> `docker compose run --rm tracker-poller tracker-repoll --profile-insert --since ...`.
 
 ## 0. Pré-requisito de modelagem: participação por empresa (nota_empresa)
 
