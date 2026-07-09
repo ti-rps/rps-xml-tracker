@@ -1,0 +1,425 @@
+# Shadow-sync — plano técnico do piloto
+
+> Status: proposta (2026-07-08), aprovada a premissa pelo dono da Athenas: o tracker
+> pode mover ASINCRONIZAR → SINCRONIZADO e inserir na TABLISTACHAVEACESSO com
+> IMPORTADO=0; o AthenasHorse segue dono da importação.
+
+## 0. Pré-requisito de modelagem: participação por empresa (nota_empresa)
+
+**Problema (levantado pelo usuário, confirmado no código):** uma mesma chave pode
+envolver DUAS empresas clientes — emitente (saída para A) e destinatário (entrada
+para B) — cada uma com seu próprio ciclo de importação no Athenas. A
+TABLISTACHAVEACESSO já modela isso (uma linha por empresa/chave), mas o tracker
+COLAPSA: `selectState` (reader.go) elege uma linha representante (importou >
+pendente > ignorada, menor CODIGOEMPRESA desempata) e a `notas` guarda UMA
+empresa, UMA direction, UM status.
+
+**Ponto cego concreto do modelo atual:** A importou, B ainda não → nota vira
+`imported` (terminal) → poller PARA de acompanhar → a importação de B nunca é
+registrada. O caso CLW/ROSEMBERG foi sintoma disso; o repoll --reconcile pode
+estar contando como "ok" notas cuja segunda participação está pendida.
+
+**Modelagem alvo (M0):**
+- `notas` — fatos da CHAVE (imutáveis): chave, doc_type, emitente, destinatário,
+  data de emissão, valor, arrived_at (a chegada é do arquivo, não da empresa).
+- `nota_empresa` — uma linha por PARTICIPAÇÃO: chave, codigo_empresa,
+  codigo_filial, papel (emitente|destinatario), direction (saida|entrada),
+  status Athenas próprio (pending/imported/ignored + motivo + imported_at),
+  synced_at/url próprios (o SINCRONIZADO tem UMA CÓPIA POR EMPRESA — confirmar
+  em F0 comparando URLs das linhas irmãs; as "cópias na timeline da EMPRESA
+  TESTE" já sugeriam isso).
+- Status da nota vira agregado das participações ("importada 1/2") e o
+  in-flight do poller passa a ser por participação — só sai do radar quando
+  TODAS as participações terminam.
+
+**Mudanças:** migração (tabela nova + backfill go-forward; retroativo por
+re-poll janelado/on-demand — 14,3M linhas, não redigerir tudo); poller emite
+observação POR PARTICIPAÇÃO (dedup_key ganha empresa; `ImportState.Rows` já
+carrega as linhas todas — hoje jogamos fora); derive agrupa import/sync por
+empresa; API: `GET /notas/{chave}` ganha `participacoes: []` (filtros de
+empresa/direção passam a olhar participação); UI mostra as participações.
+
+**Por que é pré-requisito do syncer (não do F0):** a unidade de trabalho da
+sincronização é (chave, empresa) — para nota entre dois clientes o syncer copia
+o arquivo para a pasta de CADA participante e insere UMA LINHA POR EMPRESA
+(comportamento do DownloadXML a confirmar em F0). Sem M0, as observações do
+syncer não teriam onde ancorar a segunda participação. Sequência: F0
+(investigação, mede inclusive a prevalência do multi-participação) → M0
+(modelagem) → F1 (syncer).
+
+## 1. Arquitetura proposta
+
+**Novo componente `cmd/syncer`, rodando no SRVIMPORT ao lado do agente (Opção B),
+com o move E o INSERT no mesmo processo.** Justificativa contra as alternativas:
+
+- **Não expandir o agente (A):** o agente é o observador read-only e a fonte de
+  verdade do rastreio. Se ele mesmo sincroniza, perde-se a verificação
+  independente — hoje, se o syncer mover um arquivo, o AGENTE enxerga o arquivo
+  aparecer no SINCRONIZADO e emite `file_moved` por conta própria, e o POLLER
+  enxerga a linha IMPORTADO=0 e emite `seen_pending`. Ou seja: mantendo os três
+  separados, cada efeito do syncer é confirmado por um componente que não sabe
+  que o syncer existe. Isso é o mecanismo de validação do piloto.
+- **Poller não sincroniza (D):** move em F:\ a partir do SRVRPS03 exigiria o mount
+  CIFS (credencial pendente) e criaria falha parcial coordenada entre 2 máquinas.
+- **API orquestra (C):** fica para a fase 2 — a API ganha uma fila de intenções
+  (`POST /sync-requests`) que o syncer consome via polling HTTP (mesmo HMAC do
+  ingest). É o caminho para disparar sync pela UI do maestro sem a API tocar
+  filesystem/Firebird. No piloto, o gatilho é local (flag `--chave`).
+
+O syncer é o único dono da sequência move+insert (raciocínio de falha simples),
+reusa os padrões existentes: serviço Windows kardianos (como o agente), estado
+local bbolt (journal), cliente `internal/ingest` com HMAC+spool para reportar
+observações, e conexão Firebird do `internal/firebird` — porém com **DSN separado
+de escrita** (`TRACKER_FB_WRITE_DSN`), para o poller continuar com credencial
+read-only e o raio de dano da credencial de escrita ficar restrito ao syncer.
+
+## 2. Fluxo exato da sincronização (uma chave)
+
+Ordem pensada para que QUALQUER falha no meio deixe o sistema num estado seguro
+(arquivo nunca some antes de estar garantido no destino + registrado no banco):
+
+```
+0. candidato        arquivo em ASINCRONIZAR (flag --chave no piloto)
+1. parse            xmlparse → chave, docType, emit/dest, dhEmi  (falhou? skip)
+2. resolve          Firebird RO: TABFILIAL (CNPJ→empresa/filial), TABEMPRESAS (nome)
+                    direção = raiz do CNPJ da filial vs emit/dest (lógica já usada
+                    no repoll --backfill-direction)
+3. deriva URL       internal/syncpath (função pura) → caminho relativo
+4. pre-check        idempotência: destino já existe? linha já existe na
+                    TABLISTACHAVEACESSO p/ (CHAVEACESSO, empresa, filial)?
+                    → se ambos: só remover a origem (retomada de crash)
+5. journal          bbolt: chave → estado "planned" (payload: origem, destino)
+6. copy             origem → destino com sufixo .tracker-tmp (cria diretórios)
+7. verify           re-lê o .tracker-tmp: mesmo tamanho + mesma chave no parse
+8. rename           .tracker-tmp → <CHAVE>.xml (atômico no mesmo volume NTFS)
+                    journal: "moved" | observação: sync_moved (stage sync)
+9. INSERT           TABLISTACHAVEACESSO com IMPORTADO=0, URL=caminho relativo,
+                    marcador do tracker (ver §6) | journal: "inserted"
+                    observação: sync_db_inserted (stage sync, não-progresso)
+10. delete origem   remove de ASINCRONIZAR | journal: "done"
+11. (validação)     agente emite file_moved sozinho; poller emite seen_pending
+                    sozinho; AthenasHorse importa; poller emite imported.
+```
+
+**Multi-participação (ver §0):** os passos 2–9 rodam POR PARTICIPAÇÃO — para
+nota entre dois clientes: deriva-se um destino por empresa (direção de cada
+uma), copia-se para os dois, insere-se uma linha por empresa. O passo 10
+(delete da origem) só roda depois de TODAS as participações completarem 9. O
+journal guarda estado por (chave, empresa). Piloto começa com notas de
+participação única (a allowlist single-key permite escolher).
+
+Falhas e retomada (journal bbolt dirige o resume no restart):
+- falha antes do rename (6–7): lixo `.tracker-tmp` no destino; origem intacta.
+  Retry limpa o tmp e recomeça. DownloadXML nunca disputa o `.tracker-tmp`.
+- falha entre rename e INSERT (9): arquivo no destino, sem linha → AthenasHorse
+  não importa ainda; retry só refaz o INSERT (pre-check vê o destino ok).
+- falha no delete da origem (10): arquivo nos dois lados + linha ok → retry só
+  deleta. (Se o DownloadXML pegar a origem nesse meio-tempo, o destino tem o
+  mesmo nome `<CHAVE>.xml` — sobrescrita de conteúdo idêntico — e a linha extra
+  que ele inserir é o comportamento normal da tabela, que já tem múltiplas
+  linhas por chave; o poller já lida com isso.)
+- **nunca** sobrescrever destino existente com conteúdo diferente (hash difere →
+  `sync_failed` motivo "conflito", intervenção manual).
+- **nunca** deletar a origem sem destino verificado + linha presente.
+
+## 3. Segurança / idempotência / modos
+
+- `TRACKER_SYNCER_ENABLED` (default **false**) — flag geral; sem ela o binário sai.
+- `--dry-run` — executa 0–4 e loga o plano completo (origem, destino, INSERT que
+  faria); nenhuma escrita em lugar nenhum. Modo default do piloto.
+- `--chave <44>` — sincroniza SÓ essa chave (single-key). Sem `--chave`, modo
+  varredura exige allowlist não-vazia.
+- `TRACKER_SYNCER_EMPRESAS` (allowlist CODIGOEMPRESA) e/ou
+  `TRACKER_SYNCER_DIRS` (allowlist de subpastas da ASINCRONIZAR) +
+  `TRACKER_SYNCER_MAX_PER_CYCLE` (piloto: 1).
+- **Janela do AthenasHorse (diagnóstico 2026-07-09):** o importador só importa
+  notas com EMISSÃO no mês atual ou anterior. Sincronizar nota com emissão mais
+  velha cria linha IMPORTADO=0 eterna (lixo). O syncer NÃO sincroniza fora da
+  janela por default (`--allow-stale` p/ exceções conscientes); confirmar a
+  regra exata em F0.
+- Idempotência: pre-check (arquivo destino + SELECT por chave/empresa/filial) +
+  journal bbolt + INSERT só depois de conferir que não existe linha NOSSA para a
+  chave. Corrida com o DownloadXML mitigada por: piloto single-key, allowlist
+  disjunta do que ele processa, e a partir de 15/07 ele desligado nos testes.
+- Logs: uma linha por transição de estado por chave (padrão do agente), com o
+  plano completo no dry-run.
+
+## 4. Observações novas no tracker
+
+Novos event types (stage `sync`):
+
+| evento | quando | efeito no derive |
+|---|---|---|
+| `sync_moved` | rename concluído | marca SyncedAt (progresso, como file_moved) |
+| `sync_db_inserted` | INSERT ok | só timeline (não-progresso) |
+| `sync_failed` | qualquer falha (payload: passo + erro) | só timeline (não-progresso) |
+
+**Mudança necessária no `derive`**: hoje QUALQUER observação de stage sync seta
+`SyncedAt` (derive.go, case StageSync). Passa a setar só em
+`file_moved`/`sync_moved`; os demais aparecem na timeline sem mudar o status.
+`sync_attempted` não vira observação (vira log) — observação só para fato
+consumado ou falha, senão polui a timeline. O `seen_pending`/`imported`
+continuam vindo do POLLER (verificação independente; não emitimos import).
+
+## 5. Queries de investigação da TABLISTACHAVEACESSO (fase 0, read-only)
+
+Generator/trigger da PK (não há identity no DDL — Firebird clássico usa
+generator + trigger BEFORE INSERT, OU o app faz GEN_ID client-side):
+
+```sql
+SELECT RDB$TRIGGER_NAME, RDB$TRIGGER_INACTIVE, RDB$TRIGGER_SOURCE
+FROM RDB$TRIGGERS
+WHERE RDB$RELATION_NAME = 'TABLISTACHAVEACESSO'
+  AND COALESCE(RDB$SYSTEM_FLAG, 0) = 0;
+
+SELECT RDB$GENERATOR_NAME FROM RDB$GENERATORS
+WHERE COALESCE(RDB$SYSTEM_FLAG,0)=0 AND RDB$GENERATOR_NAME CONTAINING 'CHAVE';
+```
+
+Se houver trigger ativa que faz `IF (NEW.CODIGO_CHAVEACESSO IS NULL) THEN ... GEN_ID`,
+inserimos com a PK nula e ela resolve; senão, fazemos
+`SELECT GEN_ID(<GENERATOR>, 1) FROM RDB$DATABASE` e passamos explícito.
+
+Perfil do que o DownloadXML preenche (fill-rate por coluna nas linhas recentes):
+
+```sql
+SELECT COUNT(*) AS total,
+       COUNT(SERIE) AS serie, COUNT(NUMERODOCUMENTO) AS numerodocumento,
+       COUNT("DATA") AS data_, COUNT(DOWNLOAD) AS download,
+       COUNT(SITUACAO) AS situacao, COUNT(URL) AS url,
+       COUNT(DATAEMISSAO) AS dataemissao, COUNT(ORIGEM) AS origem,
+       COUNT(VALORTOTAL) AS valortotal, COUNT(TIPO) AS tipo,
+       COUNT(TIPODOCUMENTO) AS tipodocumento, COUNT(CNPJEMITENTE) AS cnpjemitente,
+       COUNT(CNPJDESTINATARIO) AS cnpjdestinatario, COUNT(EMITENTE) AS emitente,
+       COUNT(DESTINATARIO) AS destinatario, COUNT(CAMINHOORIGINAL) AS caminhooriginal,
+       COUNT(DATAINCLUSAO) AS datainclusao, COUNT(DATADEENTRADA) AS datadeentrada,
+       COUNT(HORAEMISSAO) AS horaemissao, COUNT(CODIGOTIPOMOVIMENTO) AS codtipomov
+FROM TABLISTACHAVEACESSO
+WHERE DATAINCLUSAO >= CURRENT_DATE - 7;
+```
+
+(estender a TODAS as colunas na ferramenta; e o mesmo agrupado por
+TIPODOCUMENTO p/ ver diferenças NFe/NFCe/CTe e por TIPO p/ entrada/saída)
+
+Amostra crua para diff manual + observação de uma nota específica:
+
+```sql
+SELECT FIRST 20 * FROM TABLISTACHAVEACESSO
+WHERE DATAINCLUSAO >= CURRENT_DATE ORDER BY CODIGO_CHAVEACESSO DESC;
+
+SELECT * FROM TABLISTACHAVEACESSO WHERE CHAVEACESSO = '<chave>';
+```
+
+Prevalência do multi-participação (dimensiona o §0 — quantas chaves têm 2+
+empresas clientes, e em que combinação de status):
+
+```sql
+-- quantas chaves recentes têm mais de uma empresa
+SELECT COUNT(*) FROM (
+  SELECT CHAVEACESSO FROM TABLISTACHAVEACESSO
+  WHERE DATAINCLUSAO >= CURRENT_DATE - 30
+  GROUP BY CHAVEACESSO
+  HAVING COUNT(DISTINCT CODIGOEMPRESA) > 1
+);
+
+-- combinações de status entre as participações (importada+pendente é o ponto cego)
+SELECT SUM(CASE WHEN IMPORTADO=1 THEN 1 ELSE 0 END) AS importadas,
+       SUM(CASE WHEN IMPORTADO=0 AND COALESCE(IMPORTACAOIGNORADA,0)=0 THEN 1 ELSE 0 END) AS pendentes,
+       SUM(CASE WHEN COALESCE(IMPORTACAOIGNORADA,0)=1 THEN 1 ELSE 0 END) AS ignoradas,
+       COUNT(*) AS participacoes
+FROM TABLISTACHAVEACESSO
+WHERE DATAINCLUSAO >= CURRENT_DATE - 30
+GROUP BY CHAVEACESSO
+HAVING COUNT(DISTINCT CODIGOEMPRESA) > 1;   -- agregar no cliente por combinação
+
+-- as URLs das linhas irmãs divergem? (uma cópia física por empresa?)
+SELECT FIRST 20 t.CHAVEACESSO, t.CODIGOEMPRESA, t.TIPO, t.URL
+FROM TABLISTACHAVEACESSO t
+WHERE t.CHAVEACESSO IN (SELECT CHAVEACESSO FROM TABLISTACHAVEACESSO
+                        WHERE DATAINCLUSAO >= CURRENT_DATE - 7
+                        GROUP BY CHAVEACESSO
+                        HAVING COUNT(DISTINCT CODIGOEMPRESA) > 1)
+ORDER BY t.CHAVEACESSO, t.CODIGOEMPRESA;
+```
+
+Janela de importação do AthenasHorse (fiscal diz: emissão mês atual + anterior;
+confirmar empiricamente) e assinatura dos "descartes silenciosos":
+
+```sql
+-- quantos meses entre emissão e importação, nas importadas (confirma a janela)
+SELECT (EXTRACT(YEAR FROM DATAROBO)*12 + EXTRACT(MONTH FROM DATAROBO))
+     - (EXTRACT(YEAR FROM DATAEMISSAO)*12 + EXTRACT(MONTH FROM DATAEMISSAO)) AS meses,
+       COUNT(*)
+FROM TABLISTACHAVEACESSO
+WHERE IMPORTADO = 1 AND DATAROBO >= CURRENT_DATE - 180
+GROUP BY 1 ORDER BY 1;
+
+-- pendentes DENTRO da janela vs importadas: alguma coluna separa os descartes
+-- (Simples Nacional, devolução...)? comparar SITUACAO, CODIGOTIPOMOVIMENTO,
+-- SEMDEPARA, CODIGOTIPOCONTABIL, TIPO entre os dois grupos
+SELECT IMPORTADO, SITUACAO, CODIGOTIPOMOVIMENTO, SEMDEPARA, COUNT(*)
+FROM TABLISTACHAVEACESSO
+WHERE DATAEMISSAO >= CURRENT_DATE - 60 AND COALESCE(IMPORTACAOIGNORADA,0)=0
+GROUP BY 1,2,3,4 ORDER BY 5 DESC;
+```
+
+Valores distintos dos campos de semântica desconhecida:
+
+```sql
+SELECT ORIGEM, COUNT(*) FROM TABLISTACHAVEACESSO
+WHERE DATAINCLUSAO >= CURRENT_DATE - 30 GROUP BY ORIGEM;
+-- idem p/ SITUACAO, DOWNLOAD, TIPO, TIPODOCUMENTO, CODIGOTIPOMOVIMENTO, ORDEMATHENAS
+```
+
+## 6. Como descobrir o INSERT mínimo compatível
+
+Ferramenta de investigação: **novos modos read-only no `cmd/repoll`** (que já tem
+o ferramental de conexão FB+PG e roda em prod via `docker compose run`):
+
+- `--profile-insert`: roda o perfil de fill-rate acima (todas as colunas, janela
+  `--since`, quebras por TIPODOCUMENTO/TIPO) e imprime relatório → nos diz o
+  conjunto de colunas que o DownloadXML SEMPRE preenche (candidato a INSERT
+  mínimo) vs às vezes vs nunca.
+- `--watch-chave <chave>`: faz polling da chave a cada 15–30s e imprime a linha
+  inteira quando aparecer/mudar (coluna a coluna, com diff entre snapshots).
+  Uso: escolher uma nota fresca na ASINCRONIZAR, rodar o watch, deixar o
+  DownloadXML sincronizá-la e capturar exatamente o que ele gravou no INSERT
+  e o que o AthenasHorse muda depois (IMPORTADO 0→1, OBSERVACOESIMPORTACAO...).
+- Trigger/generator: `--profile-insert` também roda as queries de RDB$ acima.
+
+Regras do INSERT que vamos montar com esse resultado:
+- preencher o que o DownloadXML preenche sempre (esperado: CHAVEACESSO,
+  CODIGOEMPRESA, CODIGOFILIAL, CNPJEMITENTE, CNPJDESTINATARIO, EMITENTE,
+  DESTINATARIO, DATAEMISSAO, VALORTOTAL, TIPO, TIPODOCUMENTO, URL, DATAINCLUSAO,
+  IMPORTADO=0 — confirmar com dados);
+- **marcador de autoria**: gravar `OBSERVACOES = 'sync rps-xml-tracker vX.Y'`
+  (ou um valor próprio de ORIGEM, se a investigação mostrar que ORIGEM é um
+  enum de fonte — perguntar à Athenas qual valor é seguro). Sem marcador não há
+  rollback limpo nem auditoria de "quem sincronizou o quê";
+- **charset**: a conexão é charset=NONE e o banco fala Latin-1 — TUDO que
+  escrevermos (EMITENTE, URL com nome de empresa acentuado...) precisa ser
+  transcodificado UTF-8 → Latin-1 (o inverso do toUTF8 do poller), senão
+  gravamos mojibake que o Athenas exibe errado;
+- teste inicial: 1 INSERT de uma chave controlada num horário calmo, seguido de
+  `--watch-chave` até o AthenasHorse importá-la.
+
+## 7. Derivação do caminho URL (`internal/syncpath`, função pura)
+
+Hipótese (do exemplo real):
+`\<NOME_EMPRESA>\<CNPJ_FILIAL_14>\<TIPODOC>\<ENTRADA|SAIDA>\<AAAAMM>\<CHAVE>.xml`
+
+Perguntas em aberto e como cada uma se responde EMPIRICAMENTE, sem depender da
+Athenas: novo modo `repoll --check-path` pega N linhas recentes com URL
+preenchida, roda a nossa derivação com os dados da própria linha + TABEMPRESAS/
+TABFILIAL, e compara segmento a segmento com a URL real. Relatório: % de acerto
+por segmento + exemplos das divergências. Isso responde:
+- 1º segmento = TABEMPRESAS.NOME? (ou nome fantasia/campo de diretório);
+- 2º segmento = CNPJ da FILIAL dona (e não do emitente) — no exemplo coincidem
+  porque NFCe de saída é emitida pela própria empresa; ENTRADA é quem separa;
+- 3º = TIPODOCUMENTO (mapear NFe/NFCe/CTe/NFSe da nossa classificação);
+- 4º = TIPO E/S → ENTRADA/SAIDA;
+- 5º = AAAAMM de DATAEMISSAO ou de DATAINCLUSAO (casos de virada de mês decidem);
+- eventos/CCe/substitutas: ver como aparecem nas URLs reais (TPEVENTO,
+  CHAVEACESSOSUBS preenchidos) — se forem outro padrão, piloto NÃO os cobre
+  (allowlist só NFe/NFCe "normais"); DocEvento fica fora do escopo;
+- CAMINHOORIGINAL: preencher com o caminho de origem na ASINCRONIZAR se o
+  fill-rate mostrar que o DownloadXML preenche; senão NULL.
+
+Detalhes da função: sanitização de nome p/ NTFS (caracteres inválidos, ponto/
+espaço final), caminho relativo com `\` e prefixo `\` como no exemplo, e a
+assinatura `Derive(parse xmlparse.Result, emp EmpresaInfo, dir Direction) (rel
+string, err error)` com tabela de testes usando URLs reais coletadas no
+`--check-path`. Meta de aceite do piloto: ≥99% de match nos últimos 30 dias
+para NFe/NFCe; o 1% divergente vira caso de teste documentado.
+
+## 8. Piloto com uma única chave (roteiro)
+
+1. (fase 0 concluída: INSERT mínimo conhecido, derivação ≥99%, generator resolvido)
+2. Escolher a cobaia: nota NFCe/NFe de empresa combinada (candidata natural: a
+   EMPRESA TESTE já usada nas cópias — confirmar que o AthenasHorse a importa)
+   recém-chegada na ASINCRONIZAR e que o DownloadXML ainda não pegou.
+3. `syncer --dry-run --chave <chave>` no SRVIMPORT → conferir o plano impresso
+   (destino derivado vs onde o DownloadXML colocaria; INSERT completo).
+4. `repoll --watch-chave <chave>` rodando em paralelo (SRVRPS03).
+5. `syncer --chave <chave>` (ENABLED=true) → executa o fluxo do §2.
+6. Verificar, na ordem: arquivo no destino certo e fora da origem (filesystem);
+   linha na TABLISTACHAVEACESSO com nossos campos (watch); timeline no tracker
+   com `sync_moved`+`sync_db_inserted` do syncer E `file_moved` do agente;
+   depois `seen_pending` do poller.
+
+## 9. Validar que o AthenasHorse importou
+
+Nada novo a construir — é exatamente o que o tracker já faz:
+- o poller detecta IMPORTADO 0→1 e emite `imported` (timeline completa:
+  arrival → sync(syncer) → pending → imported);
+- `repoll --reconcile` audita depois em lote (a acurácia já validada em 100%);
+- painel humano: o fiscal confere a nota no Athenas (TABENTRADASAIDA/livro).
+Critério de sucesso do piloto: a cobaia chega a `imported` sem NENHUMA
+intervenção e sem divergência no reconcile; o fiscal acha o XML na pasta.
+
+## 10. Rollback manual (documentado, por chave)
+
+Vale apenas enquanto `IMPORTADO=0`. Se já importou, não há rollback técnico —
+é estorno fiscal no Athenas (fora do escopo).
+
+```
+1. DELETE FROM TABLISTACHAVEACESSO
+   WHERE CHAVEACESSO='<chave>' AND IMPORTADO=0
+     AND OBSERVACOES STARTING WITH 'sync rps-xml-tracker';   -- só a NOSSA linha
+2. mover o arquivo de volta: copiar destino → ASINCRONIZAR (nome original,
+   registrado no journal/observação sync_moved payload) e apagar o destino.
+3. tracker: as observações são append-only; emitir manualmente (ou via flag do
+   syncer `--rollback --chave`) um sync_failed com motivo "rollback manual"
+   para a timeline contar a história. A nota volta a 'arrived' quando o agente
+   a revir na ASINCRONIZAR... (na prática o status derivado já fica correto no
+   próximo derive, pois synced_at deriva das observações existentes — o
+   registro do rollback é para auditoria humana).
+```
+
+O syncer ganha `--rollback --chave <chave>` que executa 1–3 sozinho (única
+operação destrutiva, exige flag dupla `--yes`).
+
+## 11. Arquivos/módulos alterados, por fase
+
+**F0 — investigação (read-only, zero risco, dá pra começar já):**
+- `cmd/repoll`: modos `--profile-insert`, `--watch-chave`, `--check-path`
+- `internal/firebird`: SELECTs novos de apoio (RDB$, perfil, linha completa,
+  prevalência multi-participação)
+- `internal/syncpath` (novo): derivação pura + testes com URLs reais
+- Entregável: relatório do INSERT mínimo + % de acerto da derivação + decisão
+  do marcador (OBSERVACOES vs ORIGEM, confirmar com a Athenas) + prevalência e
+  comportamento do DownloadXML no multi-participação (uma cópia por empresa?)
+
+**M0 — modelagem participação por empresa (§0), antes do syncer:**
+- migração `nota_empresa` + backfill go-forward
+- `internal/firebird`: expor as linhas todas (hoje `ImportState.Rows` é jogado fora)
+- `internal/poller`: observação por participação (dedup_key com empresa);
+  in-flight por participação (nota só sai do radar com TODAS terminais)
+- `internal/derive` + `internal/model`: participações + status agregado
+- API/UI: `participacoes` no detail, filtros por participação
+- Entregável independente do shadow-sync: corrige o ponto cego
+  "A importou, B pendente" que existe HOJE
+
+**F1 — syncer dry-run (escreve só log/journal):**
+- `internal/syncer` (novo): state machine + journal bbolt + pre-checks
+- `cmd/syncer` (novo): serviço Windows (padrão kardianos do agente), flags/envs
+- `internal/firebird/writer.go` (novo): conexão TRACKER_FB_WRITE_DSN,
+  InsertChaveAcesso (transcodificação Latin-1), GEN_ID
+- `internal/model`: consts `sync_moved`/`sync_db_inserted`/`sync_failed`
+- `internal/derive`: StageSync progride só com file_moved/sync_moved
+- Rodar dry-run no SRVIMPORT alguns dias comparando o plano com o que o
+  DownloadXML faz de verdade (diff automático possível: dry-run grava o plano,
+  check-path compara com a linha que o DownloadXML criou depois)
+
+(sequência: F0 → M0 → F1 — o syncer nasce com unidade de trabalho
+(chave, empresa) ancorada nas participações)
+
+**F2 — piloto single-key (§8), com DownloadXML ainda ligado (cobaia controlada)**
+
+**F3 — allowlist com DownloadXML desligado (a partir de 15/07/2026):**
+empresa piloto → grupo de empresas → tudo; `TRACKER_SYNCER_MAX_PER_CYCLE`
+crescendo; o reconcile e o /metrics/latency medem o resultado (a latência
+chegada→sync deve desabar de p50 45h para minutos).
+
+**Fase posterior (fora do piloto):** fila de intenções na API + botão na UI do
+maestro; NFSe; eventos/CCe.
