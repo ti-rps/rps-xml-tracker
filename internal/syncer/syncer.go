@@ -197,9 +197,15 @@ func (s *Syncer) PlanFile(ctx context.Context, path string, enforceAllowlist boo
 		default:
 			continue
 		}
-		nome := s.nomes[f.CodigoEmpresa]
+		// 1º segmento = NOME DA FILIAL (TABFILIAL.NOME) — confirmado no diff
+		// plano×realidade: filiais da mesma empresa têm pastas diferentes, cada
+		// uma com o nome da própria filial. TABEMPRESAS.NOME é só fallback.
+		nome := f.Nome
 		if nome == "" {
-			plan.Skip = fmt.Sprintf("empresa %d sem nome na TABEMPRESAS", f.CodigoEmpresa)
+			nome = s.nomes[f.CodigoEmpresa]
+		}
+		if nome == "" {
+			plan.Skip = fmt.Sprintf("empresa %d/%d sem nome na TABFILIAL/TABEMPRESAS", f.CodigoEmpresa, f.CodigoFilial)
 			return plan
 		}
 		rel, err := syncpath.Derive(syncpath.Input{

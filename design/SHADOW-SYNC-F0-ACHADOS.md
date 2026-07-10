@@ -85,7 +85,7 @@ Acerto por segmento (comparando derivação atual × URL real, NFe/NFCe/CTe):
 
 | segmento | fonte | acerto | nota |
 |---|---|---|---|
-| empresa | `TABEMPRESAS.NOME` | **98%** | resto = NOME editado após o sync (não é bug) + regra `&`→`e` (já adicionada) |
+| empresa | ~~TABEMPRESAS.NOME~~ **`TABFILIAL.NOME`** | 98% → ~100% | **CORRIGIDO (2026-07-10, diff plano×realidade):** o 1º segmento é o NOME DA FILIAL — filiais da mesma empresa têm pastas com nomes DIFERENTES (caso JOAO BATISTA emp 369: fil 1 "FAZENDA CONJUNTO LINDOIA", fil 2 "JOAO BATISTA ... - FAZENDA CONJUNTO LINDOIA", ambas batendo com TABFILIAL.NOME). Os "2% de nome editado" eram na verdade FONTE ERRADA (TABEMPRESAS). Syncer/check-path corrigidos: TABFILIAL.NOME com fallback TABEMPRESAS.NOME. Regra `&`→`e` confirmada em pasta real (TRINDADE) |
 | cnpj_filial | `TABFILIAL.CNPJ` (14 díg.) | **100%** | contraprova: CNPJ do emitente só casa 77% (cai nas entradas) — confirma que é da FILIAL |
 | tipo_doc | classificação do XML | mapa aprendido | NULL→{CTe, CTeOS, NFCe, NFe}; ver §6 |
 | direção | `DirectionFromCNPJs` | **100%** (NFe/NFCe/CTe) | os 27% de "erro" eram só NFSe (PRESTADO/TOMADO) — fora do piloto |
@@ -97,6 +97,42 @@ Padrão confirmado: `\<NOME_EMPRESA>\<CNPJ_FILIAL_14>\<TIPODOC>\<ENTRADA|SAIDA>\
 Meta de aceite (≥99% NFe/NFCe) atingida em cnpj/competência/arquivo/direção; o
 segmento empresa fica ~98% por edições históricas de nome (piso inerente; a
 derivação go-forward casa o NOME vigente, como o próprio DownloadXML faz).
+
+## 5b. Diff plano×realidade do dry-run (2026-07-10, amostra dirigida de 22 chaves)
+
+Primeiro dia de dry-run do syncer no SRVIMPORT; as 22 chaves amostradas do
+`syncer-plans.jsonl` (casos difíceis: multi-participação, inter-filial, CPF,
+`&`→`e`) TODAS já tinham linhas — os arquivos na ASINCRONIZAR são CÓPIAS
+DUPLICADAS deixadas para trás (o DownloadXML sincronizou irmãs em 03-26/06).
+
+**Acertos (participações e URLs exatas):** ITALUIZA 2-way (entrada e saída),
+GEO+GREEN GOLD, MERCADO CAPIXABA+CHECON, ANA CAROL, DECAUTO inter-filial (fil 1
+e fil 2, cada CNPJ na sua pasta, nas DUAS direções), PEDRA BRANCA+PHOENIX,
+EUNAPOLIS+MODULO/+RPS, POSTO NORTE SUL+HENZO (CPF), JAILTON (CPF produtor
+rural), TRINDADE (`&`→`e` confirmado na pasta real), WEDSON (2 empresas, mesmo
+CPF → mesma pasta/arquivo, 2 linhas — nosso fluxo produz exatamente isso).
+
+**Divergências e o que revelaram:**
+- 1º segmento = TABFILIAL.NOME (ver §5) — CORRIGIDO no código;
+- **linhas EXTRAS de não-participantes**: o DownloadXML cria linhas para RPS
+  SERVICOS (52), ROSEMBERG (120) e EMPRESA TESTE (996) em notas de que NÃO são
+  parte (contas SIEG que recebem cópia de tudo — RAZAOCERTIFICADO de todas as
+  filiais é "RPS SERVICOS LTDA"). Todas ficam IMPORTADO=0 eternas — é a FONTE do
+  caso CLW/ROSEMBERG e da poluição de pendentes. O syncer deriva do XML (partes
+  reais) e NÃO cria essas linhas: desvio DELIBERADO e desejável;
+- **linhas duplicadas idênticas** (PROCIT ×2, ITALUIZA ×2...): o DownloadXML
+  insere de novo ao processar outra cópia do mesmo arquivo. O pre-check HasRow
+  do syncer evita;
+- 1 anomalia rara: URL com segmento extra de DIA (`...\202606\08\chave.xml`) em
+  1 de ~40 URLs (AG RAMOS) — fora do padrão, não coberto (o conflito-check
+  impede sobrescrita; a participação ganharia pasta padrão nova).
+
+**Refinamento anotado p/ F2:** quando HasRow já é true ANTES de qualquer move
+(nota já sincronizada por outra cópia), o syncer deveria PULAR a cópia da
+participação (hoje copiaria para a pasta derivada se o destino não existir —
+ex.: pasta com nome antigo — gerando arquivo duplicado). No modo real atual,
+para esses backlogs duplicados, o comportamento é: destino ok/linha ok → só
+remove a origem (faxina) — correto quando a URL bate.
 
 ## 6. Fora do escopo do piloto (documentado)
 
