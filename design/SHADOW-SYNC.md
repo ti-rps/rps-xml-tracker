@@ -455,3 +455,58 @@ chegada→sync deve desabar de p50 45h para minutos).
 
 **Fase posterior (fora do piloto):** fila de intenções na API + botão na UI do
 maestro; NFSe; eventos/CCe.
+
+## 12. Pendências e correções conhecidas (registradas 2026-07-10, pré-F2)
+
+**12.1 Participações-lixo de contas SIEG "pega-tudo" (EMPRESA TESTE/ROSEMBERG) —
+CORREÇÃO APROVADA EM CONCEITO, NÃO IMPLEMENTADA:**
+O DownloadXML cria linha na TABLISTACHAVEACESSO para cada CÓPIA que encontra,
+inclusive das contas SIEG que baixam XML de todo o escritório: ROSEMBERG (120) e
+EMPRESA TESTE (996), ambas com CPF 55283390578 que não é parte de nota nenhuma
+(e RPS SERVICOS 52 em menor grau). Essas linhas ficam IMPORTADO=0 eternas em
+quase toda nota — é a fonte do caso CLW/ROSEMBERG e de boa parte das pendentes
+eternas. Confirmado ao vivo na chave 29260706129109000100550010002015071463906718
+(POSTO DO TAXISTA + DAMASCO importadas; ROSEMBERG + EMPRESA TESTE pendentes).
+Dois efeitos no tracker pós-M0:
+- **regressão de exibição**: a empresa da nota usa "última observação não-vazia
+  vence"; como a participação-lixo re-emite seen_pending por último, ela rouba o
+  rótulo (nota aparece como "EMPRESA TESTE" com emitente/destinatário reais);
+- **terminalidade corroída**: participação-lixo nunca importa → status agregado
+  fica pending_import para sempre → in-transit inflado.
+Correção proposta (derive, 2 pontos): (1) atribuição da nota (empresa/nome/
+direção) passa a derivar das PARTICIPAÇÕES com a precedência do selectState
+(importada > pendente, menor código), ignorando as sem direção; (2) participação
+NÃO-PARTE (direction vazia = CNPJ/CPF da filial não casa emitente nem
+destinatário) não segura a terminalidade — continua listada no detail por
+transparência. Trade-off documentado: participação legítima com CNPJ faltante no
+cadastro também tem direção vazia e deixaria de segurar a nota (raro; mesmo
+ponto cego pré-M0). Testes devem usar o caso POSTO DO TAXISTA acima.
+**Correção de raiz (operacional, fora do tracker):** arrumar as contas SIEG de
+ROSEMBERG/EMPRESA TESTE que baixam XML de todo mundo.
+
+**12.2 Syncer — pular a cópia quando a linha já existe (refinamento pré-modo
+real):** quando HasRow(chave, empresa, filial) é true ANTES de qualquer move
+(nota já sincronizada por outra cópia), pular também a CÓPIA da participação —
+hoje o syncer copiaria para a pasta derivada se o destino não existir (ex.:
+pasta antiga com outro nome), gerando arquivo duplicado. Com isso, no backlog de
+cópias duplicadas o syncer age como FAXINEIRO (verifica e remove a origem).
+
+**12.3 Cadastro da empresa como gate do Horse (melhoria pós-piloto):** o Horse
+só importa o que o cadastro da empresa permite (tipos de movimento). O
+DownloadXML insere sem consultar (daí parte das pendentes eternas); o syncer,
+por paridade, também. Melhoria: descobrir a tabela de config e pular
+participação não-importável; casa com o status terminal novo p/ pendentes stale.
+
+**12.4 Anomalia rara de URL com segmento de DIA** (`...\202606\08\chave.xml`,
+1 em ~40): fora do padrão derivado; o conflito-check impede sobrescrita. Só
+observar a prevalência no check-plans completo.
+
+**12.5 DATAROBO morta desde 2022** (colateral, fora do shadow-sync): o
+imported_at real vem de DATAINCLUSAO (meia-noite) — explica latências
+sync→import negativas/date-granulares na UI. Avaliar se alguma outra fonte de
+hora de importação existe; senão, é o piso do dado.
+
+**12.6 Backfill retroativo da nota_empresa + filtros por participação** (M0
+follow-up): re-poll janelado/on-demand para popular participações do histórico;
+depois migrar filtros de lista de notas.codigo_empresa para EXISTS na
+nota_empresa.
