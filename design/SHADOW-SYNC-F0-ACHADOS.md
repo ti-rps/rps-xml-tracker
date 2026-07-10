@@ -158,11 +158,26 @@ do shadow-sync, mas afeta métricas existentes.)
    existentes são NULL, '' e `'AutXml'` — ou seja, a coluna JÁ é usada como
    marcador de origem por ferramenta; o nosso marcador segue o mesmo padrão.
    Contexto: o banco é hospedado pela RPS (acesso total); o dono da Athenas deu a
-   diretriz "observar como o DownloadXML preenche e fazer igual". Pendência que
-   restou (em andamento com um funcionário do Athenas): o Horse filtra por alguma
-   coluna ao escolher o que importar?
+   diretriz "observar como o DownloadXML preenche e fazer igual".
    Nota relacionada: DATAROBO está morta desde 2022 (e era DATE, não timestamp) —
    o fallback do poller (DATAINCLUSAO) é o caminho real há anos, não uma exceção.
+   **RESPONDIDO pelo funcionário do Athenas (2026-07-10) — como o Horse escolhe:**
+   - o XML precisa existir FÍSICO e VÁLIDO no caminho da URL (nosso
+     copy→verify→rename antes do INSERT cobre exatamente isso);
+   - não há filtro por coluna da TABLISTACHAVEACESSO além do IMPORTADO=0; o
+     gate é o **CADASTRO DA EMPRESA**: lá se configura SE importa e QUAIS tipos
+     de movimento (entradas/saídas/serviços). Linha de empresa/movimento não
+     configurado fica IMPORTADO=0 para sempre — **esta é a causa (ou uma das
+     causas) das "pendentes eternas dentro da janela"** que o perfil
+     pendente×importada da F0 procurou em coluna e não achou;
+   - ordem de processamento: EMPRESA A EMPRESA (pega uma, importa tudo que há
+     pendente dela, passa à próxima; sem prioridade conhecida; existe config de
+     empresa exclusiva). Explica variação de latência de import entre empresas.
+   Implicações: (a) F2 — a cobaia deve ser de empresa CONFIGURADA para importar
+   aquele tipo/direção; (b) o DownloadXML insere sem consultar o cadastro (daí
+   as pendentes eternas) e o syncer, por paridade, também — MELHORIA FUTURA:
+   syncer consultar o cadastro e pular participação não-importável (descobrir a
+   tabela de config), casando com o status terminal novo p/ stale.
 4. Charset: gravar EMITENTE/DESTINATARIO/URL/OBSERVACOES transcodificados
    UTF-8→Latin-1 (inverso do toUTF8), conexão charset=NONE.
 5. Multi-participação (M0 primeiro): um INSERT + uma cópia por (empresa, filial).
