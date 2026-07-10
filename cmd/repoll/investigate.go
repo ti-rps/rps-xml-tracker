@@ -460,8 +460,13 @@ func runCheckPath(ctx context.Context, rd *firebird.Reader, since string, sample
 			}
 			continue
 		}
-		// 0: empresa
-		stats["empresa"].add(syncpath.SanitizeSegment(r.NomeEmpresa), segs[0])
+		// 0: empresa — NOME DA FILIAL (TABFILIAL.NOME) é a fonte real do segmento;
+		// TABEMPRESAS.NOME só como fallback (achado do diff plano×realidade)
+		nomePasta := r.NomeFilial
+		if nomePasta == "" {
+			nomePasta = r.NomeEmpresa
+		}
+		stats["empresa"].add(syncpath.SanitizeSegment(nomePasta), segs[0])
 		// 1: cnpj da filial (tese) vs cnpj do emitente (contraprova)
 		stats["cnpj_filial"].add(digitsOnly(r.CnpjFilial), segs[1])
 		cnpjEmitente.add(digitsOnly(r.CnpjEmitente), segs[1])

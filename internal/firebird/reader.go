@@ -310,17 +310,23 @@ func (r *Reader) MovimentosByRegistro(ctx context.Context, from, until time.Time
 }
 
 // Filial é uma filial cadastrada no Athenas (TABFILIAL): a chave composta
-// (CODIGOEMPRESA, CODIGO) e o CNPJ do estabelecimento.
+// (CODIGOEMPRESA, CODIGO), o CNPJ do estabelecimento e o NOME próprio da filial.
+// O Nome é o 1º segmento das URLs do SINCRONIZADO (confirmado empiricamente no
+// diff plano×realidade: filiais da mesma empresa têm pastas com nomes DIFERENTES,
+// batendo com TABFILIAL.NOME — TABEMPRESAS.NOME era a fonte errada dos ~2% de
+// divergência do check-path).
 type Filial struct {
 	CodigoEmpresa int
 	CodigoFilial  int
 	Cnpj          string
+	Nome          string
 }
 
-// ListFiliais lê todas as filiais (TABFILIAL) com seu CNPJ, para o backfill retroativo
-// da direção. São poucas centenas de linhas — uma varredura barata. READ-ONLY.
+// ListFiliais lê todas as filiais (TABFILIAL) com CNPJ e NOME, para o backfill
+// retroativo da direção e para a derivação de destino do syncer. São poucas
+// centenas de linhas — uma varredura barata. READ-ONLY.
 func (r *Reader) ListFiliais(ctx context.Context) ([]Filial, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT CODIGOEMPRESA, CODIGO, CNPJ FROM TABFILIAL`)
+	rows, err := r.db.QueryContext(ctx, `SELECT CODIGOEMPRESA, CODIGO, CNPJ, NOME FROM TABFILIAL`)
 	if err != nil {
 		return nil, err
 	}
@@ -328,14 +334,17 @@ func (r *Reader) ListFiliais(ctx context.Context) ([]Filial, error) {
 	var out []Filial
 	for rows.Next() {
 		var ce, cf sql.NullInt64
-		var cnpj sql.NullString
-		if err := rows.Scan(&ce, &cf, &cnpj); err != nil {
+		var cnpj, nome sql.NullString
+		if err := rows.Scan(&ce, &cf, &cnpj, &nome); err != nil {
 			return nil, err
 		}
 		if !ce.Valid || !cf.Valid {
 			continue // sem chave composta -> não dá p/ casar com a nota
 		}
-		out = append(out, Filial{CodigoEmpresa: int(ce.Int64), CodigoFilial: int(cf.Int64), Cnpj: trimNull(cnpj)})
+		out = append(out, Filial{
+			CodigoEmpresa: int(ce.Int64), CodigoFilial: int(cf.Int64),
+			Cnpj: trimNull(cnpj), Nome: toUTF8(trimNull(nome)),
+		})
 	}
 	return out, rows.Err()
 }

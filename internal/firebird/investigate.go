@@ -380,7 +380,8 @@ type URLRow struct {
 	URL              string
 	CodigoEmpresa    *int
 	CodigoFilial     *int
-	NomeEmpresa      string // TABEMPRESAS.NOME
+	NomeEmpresa      string // TABEMPRESAS.NOME (fallback)
+	NomeFilial       string // TABFILIAL.NOME — a fonte real do 1º segmento da URL
 	CnpjFilial       string // TABFILIAL.CNPJ
 	TipoDocumento    string
 	Tipo             string // semântica E/S a confirmar — o relatório cruza com o segmento da URL
@@ -408,7 +409,7 @@ func (r *Reader) RecentURLRows(ctx context.Context, since time.Time, limit int, 
 	if hasChaveSubs {
 		extra += ", t.CHAVEACESSOSUBS"
 	}
-	q := fmt.Sprintf(`SELECT FIRST %d t.CHAVEACESSO, t.URL, t.CODIGOEMPRESA, t.CODIGOFILIAL, e.NOME, fil.CNPJ,
+	q := fmt.Sprintf(`SELECT FIRST %d t.CHAVEACESSO, t.URL, t.CODIGOEMPRESA, t.CODIGOFILIAL, e.NOME, fil.NOME, fil.CNPJ,
 	             t.TIPODOCUMENTO, t.TIPO, t.CNPJEMITENTE, t.CNPJDESTINATARIO, t.DATAEMISSAO, t.DATAINCLUSAO%s
 	      FROM TABLISTACHAVEACESSO t
 	      LEFT JOIN TABEMPRESAS e ON e.CODIGO = t.CODIGOEMPRESA
@@ -422,14 +423,14 @@ func (r *Reader) RecentURLRows(ctx context.Context, since time.Time, limit int, 
 	var out []URLRow
 	for rows.Next() {
 		var (
-			chave, url                   string
-			ce, cf                       sql.NullInt64
-			nome, cnpjFil, tipoDoc, tipo sql.NullString
-			cnpjE, cnpjD                 sql.NullString
-			emissao, inclusao            sql.NullTime
-			tpEvento, chaveSubs          sql.NullString
+			chave, url                            string
+			ce, cf                                sql.NullInt64
+			nome, nomeFil, cnpjFil, tipoDoc, tipo sql.NullString
+			cnpjE, cnpjD                          sql.NullString
+			emissao, inclusao                     sql.NullTime
+			tpEvento, chaveSubs                   sql.NullString
 		)
-		dest := []any{&chave, &url, &ce, &cf, &nome, &cnpjFil, &tipoDoc, &tipo, &cnpjE, &cnpjD, &emissao, &inclusao}
+		dest := []any{&chave, &url, &ce, &cf, &nome, &nomeFil, &cnpjFil, &tipoDoc, &tipo, &cnpjE, &cnpjD, &emissao, &inclusao}
 		if hasTpEvento {
 			dest = append(dest, &tpEvento)
 		}
@@ -443,6 +444,7 @@ func (r *Reader) RecentURLRows(ctx context.Context, since time.Time, limit int, 
 			Chave:            strings.TrimSpace(chave),
 			URL:              toUTF8(strings.TrimSpace(url)),
 			NomeEmpresa:      toUTF8(trimNull(nome)),
+			NomeFilial:       toUTF8(trimNull(nomeFil)),
 			CnpjFilial:       trimNull(cnpjFil),
 			TipoDocumento:    trimNull(tipoDoc),
 			Tipo:             trimNull(tipo),

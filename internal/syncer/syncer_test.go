@@ -333,6 +333,29 @@ func TestPlanFile_Allowlist(t *testing.T) {
 	}
 }
 
+// O 1º segmento vem do NOME DA FILIAL (TABFILIAL.NOME), não da TABEMPRESAS —
+// filiais da mesma empresa têm pastas próprias (confirmado no diff
+// plano×realidade, caso JOAO BATISTA emp 369). TABEMPRESAS é só fallback.
+func TestPlanFile_NomeDaFilial(t *testing.T) {
+	fb := newFake()
+	fb.filiais[0].Nome = "FAZENDA CONJUNTO LINDOIA" // nome PRÓPRIO da filial da emp 100
+	// filial da emp 200 sem Nome -> fallback p/ TABEMPRESAS ("EMPRESA B & FILHOS")
+	s, arrival, _ := newSyncer(t, fb, false)
+	_ = s.refreshResolve(context.Background())
+	origem := writeXML(t, arrival, "nota.xml", nfeXML(chaveTeste, cnpjA, cnpjB))
+
+	plan := s.PlanFile(context.Background(), origem, true)
+	if plan.Skip != "" {
+		t.Fatalf("plan.Skip = %q", plan.Skip)
+	}
+	if !strings.HasPrefix(plan.Participacoes[0].DestRel, `\FAZENDA CONJUNTO LINDOIA\`) {
+		t.Errorf("part[0] deveria usar o nome da FILIAL: %s", plan.Participacoes[0].DestRel)
+	}
+	if !strings.HasPrefix(plan.Participacoes[1].DestRel, `\EMPRESA B e FILHOS\`) {
+		t.Errorf("part[1] deveria cair no fallback TABEMPRESAS (com &->e): %s", plan.Participacoes[1].DestRel)
+	}
+}
+
 func TestDentroDaJanela(t *testing.T) {
 	now := time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC)
 	for emissao, want := range map[string]bool{
