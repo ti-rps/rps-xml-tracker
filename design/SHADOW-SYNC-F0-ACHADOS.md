@@ -153,8 +153,16 @@ do shadow-sync, mas afeta métricas existentes.)
    os `CODIGO*=0`, `SERIE`, `DATA`=1º dia do mês da emissão. **Sem TIPODOCUMENTO,
    sem TIPO.**
 3. Marcador de autoria: `OBSERVACOES` está livre 99% do tempo e é VARCHAR(250) —
-   candidato natural para `OBSERVACOES = 'sync rps-xml-tracker vX.Y'`. (Confirmar
-   com a Athenas que OBSERVACOES não tem uso semântico; a §6 do plano previa isso.)
+   candidato natural para `OBSERVACOES = 'sync rps-xml-tracker vX.Y'`.
+   **RESOLVIDO (2026-07-10, investigação nos próprios dados):** os únicos valores
+   existentes são NULL, '' e `'AutXml'` — ou seja, a coluna JÁ é usada como
+   marcador de origem por ferramenta; o nosso marcador segue o mesmo padrão.
+   Contexto: o banco é hospedado pela RPS (acesso total); o dono da Athenas deu a
+   diretriz "observar como o DownloadXML preenche e fazer igual". Pendência que
+   restou (em andamento com um funcionário do Athenas): o Horse filtra por alguma
+   coluna ao escolher o que importar?
+   Nota relacionada: DATAROBO está morta desde 2022 (e era DATE, não timestamp) —
+   o fallback do poller (DATAINCLUSAO) é o caminho real há anos, não uma exceção.
 4. Charset: gravar EMITENTE/DESTINATARIO/URL/OBSERVACOES transcodificados
    UTF-8→Latin-1 (inverso do toUTF8), conexão charset=NONE.
 5. Multi-participação (M0 primeiro): um INSERT + uma cópia por (empresa, filial).
