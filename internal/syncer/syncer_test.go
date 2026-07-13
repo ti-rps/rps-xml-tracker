@@ -33,19 +33,26 @@ func nfeXML(chave, emit, dest string) string {
 
 // fakeFB implementa resolver+inserter+submitter em memória.
 type fakeFB struct {
-	filiais    []firebird.Filial
-	nomes      map[int]string
-	rows       map[string]bool // "chave|emp/fil"
-	inserts    []firebird.InsertRow
-	nextID     int64
-	failInsert bool
-	obs        []model.Observation
+	filiais     []firebird.Filial
+	nomes       map[int]string
+	rows        map[string]bool // "chave|emp/fil"
+	inserts     []firebird.InsertRow
+	nextID      int64
+	failInsert  bool
+	failFiliais int // nº de ListFiliais que ainda vão falhar (simula sessão morta)
+	obs         []model.Observation
 }
 
 func rowKey(chave string, emp, fil int) string { return fmt.Sprintf("%s|%d/%d", chave, emp, fil) }
 
-func (f *fakeFB) ListFiliais(context.Context) ([]firebird.Filial, error) { return f.filiais, nil }
-func (f *fakeFB) EmpresaNomes(context.Context) (map[int]string, error)   { return f.nomes, nil }
+func (f *fakeFB) ListFiliais(context.Context) ([]firebird.Filial, error) {
+	if f.failFiliais > 0 {
+		f.failFiliais--
+		return nil, fmt.Errorf("connection shutdown\nKilled by database administrator.")
+	}
+	return f.filiais, nil
+}
+func (f *fakeFB) EmpresaNomes(context.Context) (map[int]string, error) { return f.nomes, nil }
 func (f *fakeFB) HasRow(_ context.Context, chave string, emp, fil int) (bool, error) {
 	return f.rows[rowKey(chave, emp, fil)], nil
 }

@@ -23,6 +23,7 @@ var (
 	bucketParts = []byte("participacoes") // chave|emp/fil -> partState JSON
 	bucketDone  = []byte("done")          // chave -> RFC3339 (origem removida)
 	bucketDry   = []byte("dry_planned")   // chave -> RFC3339 (já planejada no dry-run; não re-planejar)
+	bucketSweep = []byte("sweep")         // "cursor" -> último path processado (rotação da varredura)
 )
 
 // partState é o registro journalizado de uma participação.
@@ -46,7 +47,7 @@ func openJournal(path string) (*journal, error) {
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketParts, bucketDone, bucketDry} {
+		for _, b := range [][]byte{bucketParts, bucketDone, bucketDry, bucketSweep} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -122,4 +123,50 @@ func (j *journal) isDryPlanned(chave string) bool {
 		return nil
 	})
 	return planned
+}
+
+// sweepCursor é a posição durável da varredura ROTATIVA: o ÚLTIMO arquivo
+// examinado (dir da allowlist + caminho relativo à raiz dele, separador '/').
+// Vive num bucket próprio ("sweep"), separado dos registros de planos — journals
+// antigos não têm o bucket (criado vazio no open) e continuam legíveis.
+type sweepCursor struct {
+	Dir  string `json:"dir"`  // entrada de cfg.Dirs ("" = raiz da ASINCRONIZAR)
+	Path string `json:"path"` // relativo à raiz do Dir, normalizado com '/'
+}
+
+// human formata o cursor para logs/heartbeat ("" = início da rotação).
+func (c sweepCursor) human() string {
+	if c.Path == "" {
+		return ""
+	}
+	if c.Dir == "" {
+		return c.Path
+	}
+	return c.Dir + "/" + c.Path
+}
+
+var keySweepCursor = []byte("cursor")
+
+// getSweepCursor lê o cursor; ok=false quando nunca foi gravado (journal novo
+// ou anterior ao cursor) — a varredura começa do início.
+func (j *journal) getSweepCursor() (sweepCursor, bool) {
+	var c sweepCursor
+	ok := false
+	_ = j.db.View(func(tx *bolt.Tx) error {
+		if v := tx.Bucket(bucketSweep).Get(keySweepCursor); v != nil {
+			ok = json.Unmarshal(v, &c) == nil && c.Path != ""
+		}
+		return nil
+	})
+	return c, ok
+}
+
+func (j *journal) setSweepCursor(c sweepCursor) error {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return err
+	}
+	return j.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSweep).Put(keySweepCursor, b)
+	})
 }
