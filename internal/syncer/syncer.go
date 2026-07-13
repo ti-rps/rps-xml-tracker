@@ -244,11 +244,21 @@ type SweepResult struct {
 	Executed int            // execuções completas (modo real)
 	Skips    map[string]int // motivo (classe) -> quantos
 	Errors   int
+
+	CursorStart string // posição do cursor no início do ciclo ("" = início da rotação)
+	CursorEnd   string // último arquivo examinado neste ciclo
+	Wrapped     bool   // a rotação chegou ao fim da árvore e recomeçou do início
 }
 
 // SweepOnce varre a ASINCRONIZAR (subpastas da allowlist Dirs, ou a raiz toda)
 // e planeja/executa até MaxPerCycle arquivos. Exige allowlist não-vazia
 // (Empresas e/ou Dirs) — varredura sem cerca não existe no piloto.
+//
+// A varredura é ROTATIVA: um cursor durável no journal guarda o último arquivo
+// EXAMINADO (planejado ou não) e cada ciclo continua dali, com wrap-around ao
+// chegar ao fim. Sem o cursor, MaxScanPer fazia todo ciclo reexaminar os mesmos
+// primeiros N arquivos (o WalkDir é determinístico) e o resto do backlog nunca
+// era alcançado.
 func (s *Syncer) SweepOnce(ctx context.Context) (SweepResult, error) {
 	res := SweepResult{Skips: map[string]int{}}
 	if len(s.cfg.Empresas) == 0 && len(s.cfg.Dirs) == 0 {
@@ -257,36 +267,146 @@ func (s *Syncer) SweepOnce(ctx context.Context) (SweepResult, error) {
 	if err := s.refreshResolve(ctx); err != nil {
 		return res, err
 	}
-	roots := []string{s.cfg.ArrivalRoot}
+	dirs := []string{""}
 	if len(s.cfg.Dirs) > 0 {
-		roots = roots[:0]
-		for _, d := range s.cfg.Dirs {
-			roots = append(roots, filepath.Join(s.cfg.ArrivalRoot, d))
+		dirs = s.cfg.Dirs
+	}
+	cur, hasCur := s.jr.getSweepCursor()
+	start := 0
+	if hasCur {
+		hasCur = false
+		for i, d := range dirs {
+			if d == cur.Dir {
+				start, hasCur = i, true
+				break
+			}
+		}
+		if !hasCur {
+			cur = sweepCursor{} // a allowlist Dirs mudou — recomeça a rotação do zero
 		}
 	}
-	for _, root := range roots {
-		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil // subpasta inacessível não derruba a varredura
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if d.IsDir() || !strings.EqualFold(filepath.Ext(path), ".xml") {
-				return nil
-			}
-			if res.Scanned >= s.cfg.MaxScanPer || res.Planned >= s.cfg.MaxPerCycle {
-				return fs.SkipAll
-			}
-			res.Scanned++
-			s.handleFile(ctx, path, &res)
-			return nil
-		})
-		if err != nil && err != fs.SkipAll {
+	res.CursorStart = cur.human()
+
+	// Segmentos na ordem da rotação: do cursor ao fim da árvore; depois (wrap)
+	// do início de volta até o cursor, inclusive — nenhum arquivo fica além do
+	// alcance por mais de uma volta.
+	type segment struct {
+		dir         string
+		after, upto string
+		wrap        bool
+	}
+	segs := []segment{{dir: dirs[start], after: cur.Path}}
+	for i := start + 1; i < len(dirs); i++ {
+		segs = append(segs, segment{dir: dirs[i]})
+	}
+	if hasCur {
+		for i := 0; i < start; i++ {
+			segs = append(segs, segment{dir: dirs[i], wrap: true})
+		}
+		segs = append(segs, segment{dir: dirs[start], upto: cur.Path, wrap: true})
+	}
+
+	last := cur
+	for _, seg := range segs {
+		if res.Scanned >= s.cfg.MaxScanPer || res.Planned >= s.cfg.MaxPerCycle {
+			break
+		}
+		if seg.wrap && !res.Wrapped {
+			res.Wrapped = true
+			s.cfg.Log("varredura: fim da ASINCRONIZAR alcançado — recomeçando do início (wrap-around)")
+		}
+		if err := s.walkSegment(ctx, seg.dir, seg.after, seg.upto, &res, &last); err != nil {
 			return res, err
 		}
 	}
+	res.CursorEnd = last.human()
+	if res.Scanned > 0 {
+		if err := s.jr.setSweepCursor(last); err != nil {
+			s.cfg.Log("journal: gravar cursor da varredura: %v", err)
+		}
+	}
 	return res, nil
+}
+
+// walkSegment percorre UM trecho da rotação: os .xml de um dir da allowlist com
+// caminho relativo em (after, upto], na ordem do WalkDir. after=="" começa do
+// início; upto=="" vai até o fim. Subárvores inteiramente antes do cursor são
+// podadas (SkipDir) — retomar a rotação não paga o custo de reexaminar o prefixo.
+// O cursor apontar para um arquivo já removido não bloqueia nada: a comparação é
+// por ordem, não por igualdade.
+func (s *Syncer) walkSegment(ctx context.Context, dir, after, upto string, res *SweepResult, last *sweepCursor) error {
+	root := s.cfg.ArrivalRoot
+	if dir != "" {
+		root = filepath.Join(s.cfg.ArrivalRoot, dir)
+	}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // subpasta inacessível não derruba a varredura
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil || rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			if after != "" && pathLess(rel, after) && !strings.HasPrefix(after, rel+"/") {
+				return fs.SkipDir // subárvore inteira <= cursor (e não é ancestral dele)
+			}
+			if upto != "" && pathLess(upto, rel) {
+				return fs.SkipAll // daqui em diante tudo vem depois do cursor — já coberto nesta volta
+			}
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(path), ".xml") {
+			return nil
+		}
+		if after != "" && !pathLess(after, rel) {
+			return nil // antes (ou igual) ao cursor — já examinado
+		}
+		if upto != "" && pathLess(upto, rel) {
+			return fs.SkipAll
+		}
+		if res.Scanned >= s.cfg.MaxScanPer || res.Planned >= s.cfg.MaxPerCycle {
+			return fs.SkipAll
+		}
+		res.Scanned++
+		*last = sweepCursor{Dir: dir, Path: rel}
+		s.handleFile(ctx, path, res)
+		return nil
+	})
+	if err != nil && err != fs.SkipAll {
+		return err
+	}
+	return nil
+}
+
+// pathLess compara caminhos relativos (separador '/') na MESMA ordem em que o
+// WalkDir os visita: componente a componente, prefixo primeiro. Comparar a
+// string inteira erraria quando um nome contém caractere < '/' (espaço, '-',
+// '!', '.') — ex.: o WalkDir visita "a/x" antes de "a!/y", mas como strings
+// "a!/y" < "a/x".
+func pathLess(a, b string) bool {
+	for {
+		ai := strings.IndexByte(a, '/')
+		bi := strings.IndexByte(b, '/')
+		ac, bc := a, b
+		if ai >= 0 {
+			ac = a[:ai]
+		}
+		if bi >= 0 {
+			bc = b[:bi]
+		}
+		if ac != bc {
+			return ac < bc
+		}
+		if ai < 0 || bi < 0 {
+			return ai < 0 && bi >= 0
+		}
+		a, b = a[ai+1:], b[bi+1:]
+	}
 }
 
 // handleFile planeja (e no modo real executa) um arquivo da varredura.

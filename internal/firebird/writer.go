@@ -41,6 +41,11 @@ func NewWriter(ctx context.Context, dsn string) (*Writer, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	// Mesma prevenção do Reader: conexão ociosa é presa fácil do kill
+	// administrativo do Firebird — expira antes de reutilizar. SEM retry de
+	// escrita aqui: repetir um INSERT cuja resposta se perdeu arriscaria linha
+	// duplicada; a falha sobe e o Execute retoma com segurança (pre-checks).
+	db.SetConnMaxIdleTime(2 * time.Minute)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping firebird (write dsn): %w", err)
@@ -112,23 +117,41 @@ func (w *Writer) InsertChaveAcesso(ctx context.Context, id int64, r InsertRow) e
 
 // HasRow reporta se já existe linha para (chave, empresa, filial) — o pre-check
 // de idempotência do syncer (retomada de crash / corrida com o DownloadXML).
-// READ-ONLY; fica no Reader para o syncer poder checar pela credencial RO.
+// READ-ONLY (com retry de conexão); fica no Reader para o syncer poder checar
+// pela credencial RO.
 func (r *Reader) HasRow(ctx context.Context, chave string, codigoEmpresa, codigoFilial int) (bool, error) {
-	var one int
-	err := r.db.QueryRowContext(ctx, `
-		SELECT FIRST 1 1 FROM TABLISTACHAVEACESSO
-		WHERE CHAVEACESSO = ? AND CODIGOEMPRESA = ? AND CODIGOFILIAL = ?`,
-		chave, codigoEmpresa, codigoFilial).Scan(&one)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	return err == nil, err
+	var has bool
+	err := r.retry(ctx, "pre-check da linha", func(ctx context.Context) error {
+		var one int
+		err := r.db.QueryRowContext(ctx, `
+			SELECT FIRST 1 1 FROM TABLISTACHAVEACESSO
+			WHERE CHAVEACESSO = ? AND CODIGOEMPRESA = ? AND CODIGOFILIAL = ?`,
+			chave, codigoEmpresa, codigoFilial).Scan(&one)
+		if err == sql.ErrNoRows {
+			has = false
+			return nil
+		}
+		has = err == nil
+		return err
+	})
+	return has, err
 }
 
 // EmpresaNomes carrega o nome de cada empresa (TABEMPRESAS) — o 1º segmento do
 // caminho derivado. Poucos milhares de linhas; carregado uma vez por ciclo.
-// READ-ONLY. Nomes transcodificados para UTF-8 (o syncpath sanitiza depois).
+// READ-ONLY (com retry de conexão). Nomes transcodificados para UTF-8 (o
+// syncpath sanitiza depois).
 func (r *Reader) EmpresaNomes(ctx context.Context) (map[int]string, error) {
+	var out map[int]string
+	err := r.retry(ctx, "nomes de empresa", func(ctx context.Context) error {
+		var err error
+		out, err = r.empresaNomes(ctx)
+		return err
+	})
+	return out, err
+}
+
+func (r *Reader) empresaNomes(ctx context.Context) (map[int]string, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT CODIGO, NOME FROM TABEMPRESAS`)
 	if err != nil {
 		return nil, err

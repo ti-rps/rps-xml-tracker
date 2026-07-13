@@ -106,6 +106,8 @@ func (p *program) cycle() {
 		"planejados": res.Planned,
 		"executados": res.Executed,
 		"erros":      res.Errors,
+		"cursor":     res.CursorEnd,
+		"wrap":       res.Wrapped,
 	}
 	for k, v := range res.Skips {
 		pay["skip_"+k] = v
@@ -113,9 +115,11 @@ func (p *program) cycle() {
 	if err != nil {
 		log.Printf("varredura erro: %v", err)
 		pay["error"] = err.Error()
-	} else if res.Planned > 0 || res.Errors > 0 {
-		log.Printf("varredura: escaneados=%d planejados=%d executados=%d erros=%d skips=%v",
-			res.Scanned, res.Planned, res.Executed, res.Errors, res.Skips)
+	} else {
+		// Uma linha por ciclo: é o que permite ver a rotação do cursor andando
+		// pelo backlog (a correção da starvation do MaxScanPer).
+		log.Printf("varredura: escaneados=%d planejados=%d executados=%d erros=%d cursor=%q→%q wrap=%v skips=%v",
+			res.Scanned, res.Planned, res.Executed, res.Errors, res.CursorStart, res.CursorEnd, res.Wrapped, res.Skips)
 	}
 	postHeartbeat(p.ctx, p.apiURL, p.secret, p.name, pay)
 }
@@ -162,6 +166,7 @@ func (p *program) build(dryRun, allowStale bool) {
 	if err != nil {
 		log.Fatalf("firebird (ro): %v", err)
 	}
+	rd.Log = log.Printf // avisos de reconexão/retry visíveis no syncer.log
 	var wr *firebird.Writer
 	if !dryRun {
 		wr, err = firebird.NewWriter(ctx, mustEnv("TRACKER_FB_WRITE_DSN"))
