@@ -501,10 +501,22 @@ participação não-importável; casa com o status terminal novo p/ pendentes st
 1 em ~40): fora do padrão derivado; o conflito-check impede sobrescrita. Só
 observar a prevalência no check-plans completo.
 
-**12.5 DATAROBO morta desde 2022** (colateral, fora do shadow-sync): o
-imported_at real vem de DATAINCLUSAO (meia-noite) — explica latências
-sync→import negativas/date-granulares na UI. Avaliar se alguma outra fonte de
-hora de importação existe; senão, é o piso do dado.
+**12.5 imported_at à meia-noite (DATAROBO morta desde 2022) — CORREÇÃO
+PROPOSTA, NÃO IMPLEMENTADA:** com a DATAROBO morta, a cascata do poller cai na
+DATAINCLUSAO — que é a DATA DO SYNC (quando a linha entrou na tabela), à
+meia-noite, e não a hora da importação. Dois artefatos: latências sync→import
+negativas na UI, e o "importado no mesmo dia" do dashboard parcialmente
+CIRCULAR (compara a data do sync com ela mesma). Proposta:
+- imported_at = HORA DA DETECÇÃO do flip IMPORTADO 0→1 quando a nota estava em
+  acompanhamento ativo (PollOnce; o erro é a latência da rotação, e o hot-window
+  já prioriza as recém-sincronizadas — exatamente as que importam p/ a métrica);
+- manter DATAINCLUSAO só nos caminhos de detecção sabidamente atrasada (sweep,
+  repoll, backfill);
+- correção retroativa possível: toda observação imported guarda ingested_at
+  (hora em que o poller a emitiu) — teto honesto da hora de importação.
+Fazer JUNTO com o shadow-sync: com o syncer, o synced_at vira preciso
+(sync_moved real); sem este fix, a latência sync→import ficaria sempre negativa
+e o F3 não conseguiria medir o ganho real.
 
 **12.6 Backfill retroativo da nota_empresa + filtros por participação** (M0
 follow-up): re-poll janelado/on-demand para popular participações do histórico;
