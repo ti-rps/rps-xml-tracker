@@ -19,6 +19,9 @@ import (
 // Reader holds a read-only connection pool to the Athenas Firebird DB.
 type Reader struct {
 	db *sql.DB
+	// Log, quando definido, recebe os avisos de reconexão/retry (ex.: log.Printf).
+	// Nil = silencioso; nunca recebe DSN/credencial.
+	Log func(format string, args ...any)
 }
 
 // EmpresaImport is ONE TABLISTACHAVEACESSO row for a chave — the import signal as
@@ -86,7 +89,12 @@ func NewReader(ctx context.Context, dsn string) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(2)
+	db.SetMaxOpenConns(readerMaxConns)
+	// Conexões ociosas são o alvo típico do kill administrativo do Firebird
+	// (backup/manutenção): quem fica minutos parado entre ciclos reutilizaria
+	// uma sessão já morta. Expirar antes disso força reabrir — barato (conexão
+	// nova por ciclo) e evita a maioria dos "connection shutdown".
+	db.SetConnMaxIdleTime(2 * time.Minute)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping firebird: %w", err)
@@ -94,7 +102,29 @@ func NewReader(ctx context.Context, dsn string) (*Reader, error) {
 	return &Reader{db: db}, nil
 }
 
+const readerMaxConns = 2
+
 func (r *Reader) Close() error { return r.db.Close() }
+
+func (r *Reader) logf(format string, args ...any) {
+	if r.Log != nil {
+		r.Log(format, args...)
+	}
+}
+
+// flushIdle fecha as conexões ociosas do pool — a forma suportada pelo
+// database/sql de descartar uma conexão que o servidor matou sem que o driver
+// a tenha marcado como ruim (ver isConnErr).
+func (r *Reader) flushIdle() {
+	r.db.SetMaxIdleConns(0)
+	r.db.SetMaxIdleConns(readerMaxConns)
+}
+
+// retry roda uma operação read-only com o retry de conexão (retryConn). Só para
+// SELECTs — repetir leitura é sempre seguro; escrita NÃO passa por aqui.
+func (r *Reader) retry(ctx context.Context, name string, op func(context.Context) error) error {
+	return retryConn(ctx, r.logf, r.flushIdle, name, op)
+}
 
 // chunkSize keeps each IN (...) well under Firebird's parameter limit.
 const chunkSize = 400
@@ -324,8 +354,19 @@ type Filial struct {
 
 // ListFiliais lê todas as filiais (TABFILIAL) com CNPJ e NOME, para o backfill
 // retroativo da direção e para a derivação de destino do syncer. São poucas
-// centenas de linhas — uma varredura barata. READ-ONLY.
+// centenas de linhas — uma varredura barata. READ-ONLY, com retry de conexão
+// (é a 1ª consulta de cada ciclo do syncer — a que esbarra na sessão morta).
 func (r *Reader) ListFiliais(ctx context.Context) ([]Filial, error) {
+	var out []Filial
+	err := r.retry(ctx, "listar filiais", func(ctx context.Context) error {
+		var err error
+		out, err = r.listFiliais(ctx)
+		return err
+	})
+	return out, err
+}
+
+func (r *Reader) listFiliais(ctx context.Context) ([]Filial, error) {
 	rows, err := r.db.QueryContext(ctx, `SELECT CODIGOEMPRESA, CODIGO, CNPJ, NOME FROM TABFILIAL`)
 	if err != nil {
 		return nil, err

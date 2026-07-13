@@ -8,3 +8,5 @@
 # go test/coverage artifacts
 *.out
 coverage.*
+# estado local do code-graph MCP (tokensave)
+.tokensave/
