@@ -565,7 +565,7 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 	}
 
 	var aindaNao, urlOK, urlDiff, urlDiffDir, partFaltando, partExtra, importadas int
-	var exDiff, exFalta, exOutro []string
+	var exDiff, exFalta, exOutro, exExtraReal []string
 	extraByEmp := map[int]int{} // linha-fora-do-plano por CODIGOEMPRESA (contas-lixo SIEG vs. reais)
 	segDiff := map[int]int{}    // qual(is) segmento(s) divergem, por índice (empresa/cnpj/tipo/direcao/comp/arquivo)
 	for _, p := range plans {
@@ -619,6 +619,11 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 				partExtra++
 				if ce := byPart[k].CodigoEmpresa; ce != nil {
 					extraByEmp[*ce]++
+					// contas-lixo SIEG conhecidas (52/120/996) são desvio deliberado;
+					// captura só os OUTROS p/ inspeção (participação real faltando?).
+					if *ce != 52 && *ce != 120 && *ce != 996 && len(exExtraReal) < 40 {
+						exExtraReal = append(exExtraReal, p.Chave+" emp "+k)
+					}
 				}
 				if len(exFalta) < 10 {
 					exFalta = append(exFalta, p.Chave+" emp "+k+" criada pelo DownloadXML mas FORA do nosso plano")
@@ -666,6 +671,9 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 		log.Printf("    extra: emp %d -> %d participações fora do plano", e.emp, e.n)
 	}
 
+	for _, e := range exExtraReal {
+		log.Printf("  ? extra NÃO-lixo (participação real faltando?): %s", e)
+	}
 	for _, e := range exOutro {
 		log.Printf("  ✗ URL (outro segmento): %s", e)
 	}
