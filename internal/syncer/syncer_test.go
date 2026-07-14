@@ -322,6 +322,43 @@ func TestPlanFile_JanelaDeEmissao(t *testing.T) {
 
 // Allowlist na varredura: participação fora da lista descarta o arquivo INTEIRO
 // (multi-participação não sincroniza pela metade).
+// Devolução (tpNF=0): a empresa EMITE a nota mas é ENTRADA de mercadoria — o
+// DownloadXML arquiva em ENTRADA. Sem ler o tpNF, o syncer classificava como
+// saída (bug achado no check-plans: 385 divergências SAIDA×ENTRADA).
+func TestPlanFile_DevolucaoTpNF(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, true)
+	xml := `<?xml version="1.0"?><nfeProc><NFe><infNFe Id="NFe` + chaveTeste + `">` +
+		`<ide><mod>55</mod><tpNF>0</tpNF><dhEmi>2026-07-01T10:00:00-03:00</dhEmi></ide>` +
+		`<emit><CNPJ>` + cnpjA + `</CNPJ><xNome>EMISSOR TESTE</xNome></emit>` +
+		`<dest><CNPJ>` + cnpjB + `</CNPJ><xNome>DESTINO TESTE</xNome></dest>` +
+		`<total><ICMSTot><vNF>123.45</vNF></ICMSTot></total>` +
+		`</infNFe></NFe></nfeProc>`
+	origem := writeXML(t, arrival, "devol.xml", xml)
+	if err := s.refreshResolve(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	plan := s.PlanFile(context.Background(), origem, true)
+	if plan.Skip != "" {
+		t.Fatalf("plan.Skip = %q", plan.Skip)
+	}
+	var emitPart *Participacao
+	for i := range plan.Participacoes {
+		if plan.Participacoes[i].CodigoEmpresa == 100 { // empresa A = EMITENTE
+			emitPart = &plan.Participacoes[i]
+		}
+	}
+	if emitPart == nil {
+		t.Fatalf("participação do emitente (emp 100) ausente: %+v", plan.Participacoes)
+	}
+	if emitPart.Direction != model.DirEntrada {
+		t.Errorf("devolução: emitente Direction = %q; want entrada", emitPart.Direction)
+	}
+	if !strings.Contains(emitPart.DestRel, `\ENTRADA\`) {
+		t.Errorf("devolução: DestRel deveria conter \\ENTRADA\\: %s", emitPart.DestRel)
+	}
+}
+
 func TestPlanFile_Allowlist(t *testing.T) {
 	fb := newFake()
 	s, arrival, _ := newSyncer(t, fb, false)

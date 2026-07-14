@@ -191,7 +191,14 @@ func (s *Syncer) PlanFile(ctx context.Context, path string, enforceAllowlist boo
 		var dir string
 		switch fd {
 		case emitD:
+			// A empresa é o EMITENTE. Normalmente é saída, MAS numa devolução
+			// (tpNF=0) a nota é emitida pela empresa e representa ENTRADA de
+			// mercadoria — o DownloadXML arquiva em ENTRADA. Sem tpNF (não deveria
+			// ocorrer em NFe/NFCe) mantém o default saída.
 			dir = model.DirSaida
+			if res.TipoNF == "0" {
+				dir = model.DirEntrada
+			}
 		case destD:
 			dir = model.DirEntrada
 		default:

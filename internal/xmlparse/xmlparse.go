@@ -27,6 +27,7 @@ type Result struct {
 	NomeDestinatario string
 	DataEmissao      string // yyyy-mm-dd
 	ValorTotal       string // raw, ex.: "1234.56"
+	TipoNF           string // <tpNF> (ide): "0"=entrada, "1"=saída (NFe/NFCe); "" p/ CTe/NFSe
 }
 
 // ParseFile opens path read-only and extracts the fields.
@@ -77,6 +78,11 @@ func Parse(r io.Reader) (Result, error) {
 				}
 			case "mod":
 				mod = strings.TrimSpace(text(dec))
+			case "tpNF":
+				// tpNF (ide) só existe em NFe/NFCe; 0=entrada (devolução), 1=saída.
+				if res.TipoNF == "" {
+					res.TipoNF = strings.TrimSpace(text(dec))
+				}
 			case "chNFe":
 				if res.Chave == "" {
 					if k := normalizeKey(text(dec)); k != "" {
