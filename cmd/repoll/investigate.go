@@ -564,8 +564,10 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 		log.Fatalf("check-plans: firebird: %v", err)
 	}
 
-	var aindaNao, urlOK, urlDiff, partFaltando, partExtra, importadas int
-	var exDiff, exFalta []string
+	var aindaNao, urlOK, urlDiff, urlDiffDir, partFaltando, partExtra, importadas int
+	var exDiff, exFalta, exOutro []string
+	extraByEmp := map[int]int{} // linha-fora-do-plano por CODIGOEMPRESA (contas-lixo SIEG vs. reais)
+	segDiff := map[int]int{}    // qual(is) segmento(s) divergem, por índice (empresa/cnpj/tipo/direcao/comp/arquivo)
 	for _, p := range plans {
 		rows := real[p.Chave]
 		if len(rows) == 0 {
@@ -598,6 +600,15 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 				urlOK++
 			} else {
 				urlDiff++
+				which := diffSegments(part.DestRel, r.URL) // índices de segmentos divergentes
+				for _, i := range which {
+					segDiff[i]++
+				}
+				if len(which) == 1 && which[0] == 3 {
+					urlDiffDir++ // difere SÓ no segmento ENTRADA/SAIDA (suspeita de devolução/tpNF)
+				} else if len(exOutro) < 10 {
+					exOutro = append(exOutro, p.Chave+" emp "+k+" segs="+segNames(which)+"\n      plano: "+part.DestRel+"\n      real : "+r.URL)
+				}
 				if len(exDiff) < 10 {
 					exDiff = append(exDiff, p.Chave+" emp "+k+"\n      plano: "+part.DestRel+"\n      real : "+r.URL)
 				}
@@ -606,6 +617,9 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 		for k := range byPart {
 			if !planned[k] {
 				partExtra++
+				if ce := byPart[k].CodigoEmpresa; ce != nil {
+					extraByEmp[*ce]++
+				}
 				if len(exFalta) < 10 {
 					exFalta = append(exFalta, p.Chave+" emp "+k+" criada pelo DownloadXML mas FORA do nosso plano")
 				}
@@ -615,7 +629,46 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 	log.Printf("planos ainda não sincronizados pelo DownloadXML: %d (re-rode mais tarde)", aindaNao)
 	log.Printf("participações: URL bate=%d, URL diverge=%d, planejada-sem-linha=%d, linha-fora-do-plano=%d",
 		urlOK, urlDiff, partFaltando, partExtra)
+	log.Printf("  divergências de URL: SÓ direção (ENTRADA/SAIDA)=%d, com outro segmento=%d", urlDiffDir, urlDiff-urlDiffDir)
+	for i, name := range syncpath.SegmentNames {
+		if segDiff[i] > 0 {
+			log.Printf("    segmento %q divergiu em %d participações", name, segDiff[i])
+		}
+	}
 	log.Printf("linhas já importadas pelo AthenasHorse: %d", importadas)
+
+	// quebra dos extras por empresa: separa as contas-lixo SIEG conhecidas (52 RPS
+	// SERVICOS, 120 ROSEMBERG, 996 EMPRESA TESTE) do resto — o resto seriam
+	// participações reais que o syncer estaria DEIXANDO de planejar (preocupante).
+	lixo := map[int]bool{52: true, 120: true, 996: true}
+	var extraLixo, extraOutros int
+	type empCount struct {
+		emp int
+		n   int
+	}
+	var outros []empCount
+	for emp, n := range extraByEmp {
+		if lixo[emp] {
+			extraLixo += n
+		} else {
+			extraOutros += n
+			outros = append(outros, empCount{emp, n})
+		}
+	}
+	sort.Slice(outros, func(i, j int) bool { return outros[i].n > outros[j].n })
+	log.Printf("  linha-fora-do-plano: contas-lixo SIEG (52/120/996)=%d, OUTRAS empresas=%d (%d empresas distintas)",
+		extraLixo, extraOutros, len(outros))
+	for i, e := range outros {
+		if i >= 15 {
+			log.Printf("  ... +%d empresas com extras", len(outros)-15)
+			break
+		}
+		log.Printf("    extra: emp %d -> %d participações fora do plano", e.emp, e.n)
+	}
+
+	for _, e := range exOutro {
+		log.Printf("  ✗ URL (outro segmento): %s", e)
+	}
 	for _, e := range exDiff {
 		log.Printf("  ✗ URL: %s", e)
 	}
@@ -626,6 +679,39 @@ func runCheckPlans(ctx context.Context, rd *firebird.Reader, path string, limit 
 		log.Printf("VEREDITO: %d participações comparadas, plano == realidade. Pronto p/ o piloto F2.", urlOK)
 	}
 	log.Printf("=== fim do check-plans ===")
+}
+
+// diffSegments retorna os índices dos segmentos que divergem entre plano e real.
+// Se os caminhos têm contagens de segmentos diferentes, retorna nil (divergência
+// estrutural que o histograma por índice não representa bem — cai em exOutro).
+func diffSegments(planned, real string) []int {
+	ps, rs := syncpath.Segments(planned), syncpath.Segments(real)
+	if len(ps) != len(rs) {
+		return nil
+	}
+	var out []int
+	for i := range ps {
+		if !strings.EqualFold(strings.TrimSpace(ps[i]), strings.TrimSpace(rs[i])) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// segNames traduz índices de segmento em nomes legíveis para os exemplos.
+func segNames(idx []int) string {
+	if len(idx) == 0 {
+		return "estrutural(nº de segmentos difere)"
+	}
+	names := make([]string, 0, len(idx))
+	for _, i := range idx {
+		if i >= 0 && i < len(syncpath.SegmentNames) {
+			names = append(names, syncpath.SegmentNames[i])
+		} else {
+			names = append(names, "?")
+		}
+	}
+	return strings.Join(names, "+")
 }
 
 func derefInt0(p *int) int {
