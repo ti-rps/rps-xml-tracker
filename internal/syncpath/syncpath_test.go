@@ -103,13 +103,13 @@ func TestDeriveErros(t *testing.T) {
 func TestSanitizeSegment(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"GESTAO BEACH LTDA", "GESTAO BEACH LTDA"},
-		{"J MARCOS ALVES TRINDADE & CIA LTDA", "J MARCOS ALVES TRINDADE e CIA LTDA"}, // & -> e (URL real)
-		{"AUTO POSTO S/A", "AUTO POSTO SA"},
-		{"EMPRESA LTDA.", "EMPRESA LTDA"},
-		{"  EMPRESA  ", "EMPRESA"},
+		{"MARIA SELMA SOUZA ALVES & CIA LTDA", "MARIA SELMA SOUZA ALVES & CIA LTDA"}, // & mantido (URL real, exp. 2026-07-14)
+		{"AUTO POSTO S/A", "AUTO POSTO SA"},                                          // '/' é ilegal no NTFS -> removido
+		{"CLW CHURRASCARIA LTDA.", "CLW CHURRASCARIA LTDA."},                         // ponto final mantido (URL real)
+		{"  EMPRESA  ", "EMPRESA"},                                                   // espaço nas pontas aparado
 		{`A<B>C:D"E/F\G|H?I*J`, "ABCDEFGHIJ"},
 		{"NOME\x00COM\x1fCONTROLE", "NOMECOMCONTROLE"},
-		{"TRAILING. . ", "TRAILING"},
+		{"TRAILING. . ", "TRAILING. ."}, // só espaço final aparado; pontos ficam
 		{"ACENTUAÇÃO É PRESERVADA", "ACENTUAÇÃO É PRESERVADA"},
 	}
 	for _, c := range cases {

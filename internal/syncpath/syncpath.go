@@ -108,32 +108,35 @@ func Competencia(dataEmissao string) (string, error) {
 	return comp, nil
 }
 
-// SanitizeSegment reproduz como o DownloadXML monta o nome da pasta da empresa a
-// partir de TABEMPRESAS.NOME. Regras confirmadas empiricamente no repoll
-// --check-path (5000 URLs reais, jul/2026):
-//   - "&" vira "e" (ex.: NOME "J MARCOS ALVES TRINDADE & CIA LTDA" -> pasta
-//     "...TRINDADE e CIA LTDA");
+// SanitizeSegment reproduz como o DownloadXML monta o nome da pasta da filial a
+// partir de TABFILIAL.NOME. Regra confirmada empiricamente (repoll --check-plans
+// + experimento sobre TABFILIAL/URL, jul/2026): o DownloadXML usa o NOME
+// VERBATIM, removendo apenas o que o NTFS não aceita:
 //   - caracteres reservados do NTFS (< > : " / \ | ? *) e controles (0x00-0x1F)
 //     são removidos;
-//   - ponto/espaço finais são cortados (NTFS não os mantém).
+//   - espaço em branco nas pontas é aparado.
 //
-// Divergências residuais (~1-2%) são notas cuja pasta foi criada com um NOME que
-// depois foi editado na TABEMPRESAS — não são erro de derivação (go-forward casa
-// o NOME vigente). Se o --check-path revelar outra transformação, ela entra aqui
-// com um caso de teste usando a URL real.
+// NÃO transformamos "&"→"e" nem cortamos ponto final: o check-plans mostrou 735
+// divergências onde o real MANTÉM "&"/"." (ex.: "MARIA SELMA ... & CIA LTDA",
+// "CLW CHURRASCARIA LTDA."); e das 14 filiais com "&" no cadastro, 13 mantêm o
+// "&" na URL real (a 14ª usa um nome fantasia distinto, não "&"→"e"). Isso
+// REVERTE a hipótese "&"→"e" da F0 (que não se sustentou nos dados).
+//
+// Divergências residuais são notas cuja pasta foi criada com um NOME diferente
+// do vigente (nome fantasia/edição cadastral) — não são erro de derivação; o
+// go-forward é casar a pasta EXISTENTE quando houver, e só criar nome canônico
+// quando não houver.
 func SanitizeSegment(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		switch {
-		case r == '&':
-			b.WriteRune('e')
 		case r < 0x20:
 		case strings.ContainsRune(`<>:"/\|?*`, r):
 		default:
 			b.WriteRune(r)
 		}
 	}
-	return strings.TrimRight(strings.TrimSpace(b.String()), ". ")
+	return strings.TrimSpace(b.String())
 }
 
 // Segments quebra uma URL real (ou derivada) nos segmentos, ignorando o "\"

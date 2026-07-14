@@ -395,8 +395,8 @@ func TestPlanFile_NomeDaFilial(t *testing.T) {
 	if !strings.HasPrefix(plan.Participacoes[0].DestRel, `\FAZENDA CONJUNTO LINDOIA\`) {
 		t.Errorf("part[0] deveria usar o nome da FILIAL: %s", plan.Participacoes[0].DestRel)
 	}
-	if !strings.HasPrefix(plan.Participacoes[1].DestRel, `\EMPRESA B e FILHOS\`) {
-		t.Errorf("part[1] deveria cair no fallback TABEMPRESAS (com &->e): %s", plan.Participacoes[1].DestRel)
+	if !strings.HasPrefix(plan.Participacoes[1].DestRel, `\EMPRESA B & FILHOS\`) {
+		t.Errorf("part[1] deveria cair no fallback TABEMPRESAS (& mantido verbatim): %s", plan.Participacoes[1].DestRel)
 	}
 }
 
