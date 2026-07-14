@@ -522,3 +522,54 @@ e o F3 não conseguiria medir o ganho real.
 follow-up): re-poll janelado/on-demand para popular participações do histórico;
 depois migrar filtros de lista de notas.codigo_empresa para EXISTS na
 nota_empresa.
+
+## 12bis. F1 — diff plano×realidade (`repoll --check-plans`, 2026-07-14)
+
+Rodado READ-ONLY do dev contra o Firebird de prod, comparando os 19.028 planos
+do dry-run (`syncer-plans.jsonl`, gerado 10–13/07) com o que o DownloadXML
+gravou de fato na TABLISTACHAVEACESSO. A ferramenta ganhou histograma por
+segmento e quebra dos extras por empresa (commits `092b92a`, `3a71d35`).
+
+Resultado: URL bate≈15.6k · **URL diverge=1.120** · planejada-sem-linha=3 ·
+**linha-fora-do-plano=12.261** · já importadas≈9.35k · aindaNao=4.581. As 1.120
+divergências eram DOIS problemas distintos, ambos **corrigidos**:
+
+**12.7 Direção ignorava devolução (`tpNF`) — CORRIGIDO (commit `2d54fc8`):**
+385 divergências eram SÓ o segmento ENTRADA/SAIDA, todas notas EMITIDAS pela
+própria empresa (mesmo CNPJ) que o DownloadXML arquiva em ENTRADA — devolução
+(`tpNF=0`). O `DirectionFromCNPJs` (model.go, usado tb. pelo poller/backfill que
+não têm XML) marca emitente como saída sempre. Fix no syncer: `xmlparse` passou
+a ler `<tpNF>` (`Result.TipoNF`) e o `PlanFile` faz emitente + `tpNF=0` → ENTRADA.
+Corroborado pela origem SIEG (a nota já vem na pasta `\Entrada\` da emitente).
+Testes: `xmlparse.TestParse_TipoNF`, `syncer.TestPlanFile_DevolucaoTpNF`.
+Revê o "direção 100%" da F0 (SHADOW-SYNC-F0-ACHADOS.md §5).
+
+**12.8 Nome da pasta não é "&"→"e" nem corta ponto — CORRIGIDO (commit
+`53aaa5b`):** 735 divergências eram só o segmento da empresa. O `SanitizeSegment`
+fazia `&`→`e` e cortava ponto final, mas o DownloadXML MANTÉM ambos (`MARIA
+SELMA ... & CIA LTDA`, `CLW CHURRASCARIA LTDA.`). Experimento read-only sobre
+TABFILIAL×URL: 13/13 filiais com `&` mantêm o `&` na pasta real (a 14ª usa nome
+fantasia distinto, não `&`→`e`); as 2 com ponto mantêm o ponto. **Reverte a
+hipótese `&`→`e` da F0** — não se sustentou nos dados. `SanitizeSegment` agora usa
+o NOME verbatim, removendo só reservado-NTFS + controle e aparando espaço.
+Resíduo (nome fantasia/edição cadastral, ex.: filial da ACCORDES cuja pasta real
+é "LUCRO REAL") fica p/ go-forward: casar a pasta EXISTENTE por comparação
+normalizada, criar nome canônico só quando não existir.
+
+**Extras (12.261) — diagnóstico:** 12.222 (99,7%) são as contas-lixo SIEG
+52/120/996 (§12.1), desvio deliberado. Os outros 39 (0,17%) NÃO são participação
+real faltando: são tail de certificado SIEG compartilhado (36 de 3 notas do
+emitente CNPJ 45230721000126 espalhadas p/ ~12 empresas não-parte). O syncer, por
+derivar do XML, exclui todo esse lixo genericamente — a lista fixa 52/120/996 do
+§12.1 é mais estreita que o tail real, mas isso é irrelevante na prática.
+
+**Validação ponta-a-ponta PENDENTE:** os fixes 12.7/12.8 mudam a DERIVAÇÃO; o
+`syncer-plans.jsonl` analisado foi gerado pelo syncer ANTIGO. Regenerar os planos
+com o syncer novo (dry-run no SRVIMPORT) e re-rodar `--check-plans` deve zerar os
+385 e os 735, sobrando só o resíduo de nome fantasia (+ os `aindaNao`, que o
+DownloadXML ainda não tinha pego na janela).
+
+**Segurança (achado colateral):** o `.env.example` versionado tem credencial
+`SYSDBA` real (superusuário, não read-only) — a premissa de "credencial
+read-only p/ poller/investigação" não é verdade; convém trocar por um usuário só
+de leitura e tirar o segredo do git.
