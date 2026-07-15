@@ -115,6 +115,28 @@ func (w *Writer) InsertChaveAcesso(ctx context.Context, id int64, r InsertRow) e
 	return err
 }
 
+// DeleteOurRows apaga as linhas que ESTE tracker inseriu para uma chave e que o
+// AthenasHorse ainda NÃO importou. Os dois filtros são a rede de segurança do
+// rollback (§10): IMPORTADO=0 nunca toca numa nota já importada (aí é estorno
+// fiscal, fora do escopo) e OBSERVACOES STARTING WITH garante que só as NOSSAS
+// linhas somem — jamais uma linha do DownloadXML. Retorna quantas apagou.
+func (w *Writer) DeleteOurRows(ctx context.Context, chave, markerPrefix string) (int64, error) {
+	if len(chave) != 44 {
+		return 0, fmt.Errorf("rollback: chave precisa ter 44 dígitos: %q", chave)
+	}
+	if markerPrefix == "" {
+		return 0, fmt.Errorf("rollback: markerPrefix vazio apagaria linhas de terceiros")
+	}
+	res, err := w.db.ExecContext(ctx, `
+		DELETE FROM TABLISTACHAVEACESSO
+		WHERE CHAVEACESSO = ? AND IMPORTADO = 0 AND OBSERVACOES STARTING WITH ?`,
+		chave, toLatin1(markerPrefix))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // HasRow reporta se já existe linha para (chave, empresa, filial) — o pre-check
 // de idempotência do syncer (retomada de crash / corrida com o DownloadXML).
 // READ-ONLY (com retry de conexão); fica no Reader para o syncer poder checar

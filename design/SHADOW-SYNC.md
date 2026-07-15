@@ -408,8 +408,17 @@ Vale apenas enquanto `IMPORTADO=0`. Se já importou, não há rollback técnico 
    registro do rollback é para auditoria humana).
 ```
 
-O syncer ganha `--rollback --chave <chave>` que executa 1–3 sozinho (única
-operação destrutiva, exige flag dupla `--yes`).
+**IMPLEMENTADO (2026-07-15):** `syncer --rollback <chave> --yes` executa 1–3
+sozinho — única operação destrutiva do syncer. Roda sempre em modo REAL (precisa
+do `TRACKER_FB_WRITE_DSN` p/ o DELETE) e exige `--yes` além do `TRACKER_SYNCER_ENABLED`.
+O DELETE filtra por `IMPORTADO=0` + `OBSERVACOES STARTING WITH 'sync
+rps-xml-tracker'` (nunca toca linha do DownloadXML nem já importada); restaura a
+origem a partir da 1ª cópia íntegra (via journal) e apaga os destinos; emite
+`sync_failed` "rollback manual" por participação. Se já importou, o filtro
+`IMPORTADO=0` protege e o resultado reporta 0 linhas apagadas (aí é estorno
+fiscal, fora do escopo). Testes: `syncer.TestRollback_DesfazSync`,
+`firebird` (DeleteOurRows). Se não houver journal (ex.: outra máquina), faz só o
+DELETE e avisa que o arquivo é manual.
 
 ## 11. Arquivos/módulos alterados, por fase
 

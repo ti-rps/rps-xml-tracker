@@ -220,6 +220,7 @@ func (p *program) build(dryRun, allowStale bool) {
 type syncerInserter interface {
 	NextChaveID(ctx context.Context) (int64, error)
 	InsertChaveAcesso(ctx context.Context, id int64, r firebird.InsertRow) error
+	DeleteOurRows(ctx context.Context, chave, markerPrefix string) (int64, error)
 }
 
 func postHeartbeat(ctx context.Context, apiURL, secret, name string, payload map[string]any) {
@@ -251,6 +252,8 @@ func main() {
 	file := flag.String("file", "", "caminho do XML na ASINCRONIZAR (com --chave)")
 	once := flag.Bool("once", false, "uma varredura e sai")
 	allowStale := flag.Bool("allow-stale", false, "permite emissão fora da janela do AthenasHorse (mês atual+anterior)")
+	rollbackChave := flag.String("rollback", "", "DESTRUTIVO: desfaz a sincronização desta chave (apaga NOSSAS linhas IMPORTADO=0, restaura o arquivo na ASINCRONIZAR); exige --yes")
+	yes := flag.Bool("yes", false, "confirma a operação destrutiva do --rollback")
 	flag.Parse()
 
 	// Dry-run é o DEFAULT: o modo real exige TRACKER_SYNCER_DRY_RUN=false
@@ -295,6 +298,26 @@ func main() {
 	}
 
 	setupLog()
+
+	// Rollback single-key (§10): única operação destrutiva. Sempre modo REAL
+	// (precisa do writer p/ o DELETE); exige --yes além do ENABLED.
+	if *rollbackChave != "" {
+		if !*yes {
+			log.Fatal("--rollback é destrutivo (apaga linhas e mexe em arquivos) — confirme com --yes")
+		}
+		prg.build(false, true) // dryRun=false força a conexão de escrita; allowStale irrelevante aqui
+		defer prg.closeAll()
+		res, err := prg.sn.Rollback(prg.ctx, *rollbackChave)
+		if err != nil {
+			log.Fatalf("rollback %s: %v", *rollbackChave, err)
+		}
+		log.Printf("rollback concluído: chave=%s linhas_apagadas=%d origem_restaurada=%d destinos_apagados=%d",
+			res.Chave, res.RowsDeleted, res.FilesRestored, res.FilesDeleted)
+		for _, w := range res.Warnings {
+			log.Printf("  aviso: %s", w)
+		}
+		return
+	}
 
 	// Gatilho single-key (piloto F2): roda uma vez e sai, sem loop de serviço.
 	if *chave != "" {

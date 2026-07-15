@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -89,6 +90,55 @@ func (j *journal) getPart(chave string, emp, fil int) (partState, bool) {
 		return nil
 	})
 	return st, found
+}
+
+// journaledPart é uma participação recuperada do journal para o rollback.
+type journaledPart struct {
+	Emp, Fil int
+	State    partState
+}
+
+// partsForChave devolve todas as participações journalizadas de uma chave
+// (varre o bucket por prefixo "<chave>|").
+func (j *journal) partsForChave(chave string) []journaledPart {
+	prefix := []byte(chave + "|")
+	var out []journaledPart
+	_ = j.db.View(func(tx *bolt.Tx) error {
+		c := tx.Bucket(bucketParts).Cursor()
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			var st partState
+			if json.Unmarshal(v, &st) != nil {
+				continue
+			}
+			var emp, fil int
+			if _, err := fmt.Sscanf(string(k[len(prefix):]), "%d/%d", &emp, &fil); err != nil {
+				continue
+			}
+			out = append(out, journaledPart{Emp: emp, Fil: fil, State: st})
+		}
+		return nil
+	})
+	return out
+}
+
+// clearChave remove os registros locais (participações + done) de uma chave após
+// um rollback, para que um re-sync futuro parta do zero.
+func (j *journal) clearChave(chave string) error {
+	prefix := []byte(chave + "|")
+	return j.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketParts)
+		var del [][]byte
+		c := b.Cursor()
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+			del = append(del, append([]byte(nil), k...)) // copiar: k é reusado pelo cursor
+		}
+		for _, k := range del {
+			if err := b.Delete(k); err != nil {
+				return err
+			}
+		}
+		return tx.Bucket(bucketDone).Delete([]byte(chave))
+	})
 }
 
 // markDone registra que a chave completou (origem removida).

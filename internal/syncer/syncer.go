@@ -38,6 +38,7 @@ type resolver interface {
 type inserter interface {
 	NextChaveID(ctx context.Context) (int64, error)
 	InsertChaveAcesso(ctx context.Context, id int64, r firebird.InsertRow) error
+	DeleteOurRows(ctx context.Context, chave, markerPrefix string) (int64, error)
 }
 
 // submitter envia observações ao tracker (implementada por *ingest.Client).
@@ -80,8 +81,8 @@ func New(cfg Config, rd resolver, wr inserter, sub submitter) (*Syncer, error) {
 	if cfg.ArrivalRoot == "" || cfg.SyncRoot == "" {
 		return nil, fmt.Errorf("syncer: ArrivalRoot e SyncRoot são obrigatórios")
 	}
-	if cfg.Marker == "" {
-		return nil, fmt.Errorf("syncer: Marker (OBSERVACOES) é obrigatório — sem ele não há rollback limpo")
+	if !strings.HasPrefix(cfg.Marker, MarkerPrefix) {
+		return nil, fmt.Errorf("syncer: Marker (OBSERVACOES) deve começar com %q — é o filtro do rollback limpo; recebido %q", MarkerPrefix, cfg.Marker)
 	}
 	if !cfg.DryRun && wr == nil {
 		return nil, fmt.Errorf("syncer: modo real exige a conexão de escrita (TRACKER_FB_WRITE_DSN)")
