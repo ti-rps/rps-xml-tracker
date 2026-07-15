@@ -35,6 +35,30 @@ func TestParse_ExtractsParties(t *testing.T) {
 	}
 }
 
+func TestParse_TipoNF(t *testing.T) {
+	cases := []struct {
+		name string
+		ide  string
+		want string
+	}{
+		{"saída (tpNF=1)", `<mod>55</mod><tpNF>1</tpNF>`, "1"},
+		{"entrada/devolução (tpNF=0)", `<mod>55</mod><tpNF>0</tpNF>`, "0"},
+		{"ausente (CTe/NFSe)", `<mod>55</mod>`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			xml := `<NFe><infNFe Id="NFe35250712345678000190550010000001231000001234"><ide>` + c.ide + `</ide></infNFe></NFe>`
+			r, err := Parse(strings.NewReader(xml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.TipoNF != c.want {
+				t.Errorf("TipoNF = %q, want %q", r.TipoNF, c.want)
+			}
+		})
+	}
+}
+
 func TestParse(t *testing.T) {
 	cases := []struct {
 		name    string
