@@ -581,4 +581,48 @@ DownloadXML ainda não tinha pego na janela).
 **Segurança (achado colateral):** o `.env.example` versionado tem credencial
 `SYSDBA` real (superusuário, não read-only) — a premissa de "credencial
 read-only p/ poller/investigação" não é verdade; convém trocar por um usuário só
-de leitura e tirar o segredo do git.
+de leitura e tirar o segredo do git. Endurecimento tratado no §13.
+
+## 13. Endurecimento de segurança (follow-up, registrado 2026-07-15)
+
+Acordado fazer DEPOIS de estabilizar o piloto — **não bloqueia o F2**. Enquanto
+isso, o `TRACKER_FB_WRITE_DSN` aponta para o mesmo usuário `SYSDBA` da leitura
+(decisão consciente para começar os testes; a separação do §1 fica pendente).
+
+**13.1 Credencial de escrita dedicada.** Criar um usuário Firebird só para o
+syncer com `GRANT SELECT, INSERT, DELETE ON TABLISTACHAVEACESSO` (e nada mais), e
+um usuário só-leitura para o poller/`repoll`. Só então o raio de dano da
+credencial de escrita fica de fato restrito ao syncer (a premissa da Opção B do
+§1). Hoje ambos usam `SYSDBA`, que pode tudo.
+
+**13.2 Tirar o segredo do git + rotacionar.** Trocar o `TRACKER_FB_DSN` do
+`.env.example` por um placeholder e mover o valor real para secret/env do
+servidor. Como o segredo já esteve no histórico do git, **rotacionar a senha do
+`SYSDBA`** depois de criar os usuários dedicados (13.1).
+
+**13.3 Menor privilégio por componente.** Revisar quem usa qual credencial
+(poller, `repoll` de investigação, syncer) e garantir o mínimo em cada — leitura
+para observação/auditoria, escrita só no syncer.
+
+## 14. Protocolo de segurança & redundância do piloto (a revisar antes do F2)
+
+Esqueleto para a revisão conjunta (a detalhar). Objetivo: começar os testes sem
+sustos, com o mínimo de erro e recuperação sem dor de cabeça.
+
+**Salvaguardas já no código (herança do F1):** dry-run é o default; `ENABLED`
+trava o binário; modo real exige `TRACKER_FB_WRITE_DSN`; ordem à prova de crash
+(`copy .tracker-tmp → verify → rename → INSERT → delete origem`); nunca
+sobrescreve destino divergente (conflito → intervenção manual); nunca apaga a
+origem sem destino verificado + linha presente; journal bbolt durável;
+`IMPORTADO=0` em todo INSERT; marcador `OBSERVACOES` em toda linha nossa.
+
+**Recuperação:** `syncer --rollback <chave> --yes` (§10) desfaz enquanto
+`IMPORTADO=0`; as 3 observações independentes (agente/poller/syncer) cross-checam
+cada efeito; no F2 o DownloadXML segue ligado como rede.
+
+**A definir na revisão (candidatos):** (a) backup/snapshot da `TABLISTACHAVEACESSO`
+antes do 1º write; (b) auditoria em lote das nossas linhas pelo marcador
+(listar/contar tudo que inserimos — e rollback em massa se preciso); (c)
+critério de escolha e nº da cobaia; (d) teste do próprio rollback numa chave de
+mentira antes do 1º real; (e) matriz "o que pode dar errado → resposta"; (f)
+limites operacionais (`MAX_PER_CYCLE`, allowlist estreita) no arranque.
