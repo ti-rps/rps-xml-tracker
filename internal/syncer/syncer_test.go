@@ -57,6 +57,16 @@ func (f *fakeFB) HasRow(_ context.Context, chave string, emp, fil int) (bool, er
 	return f.rows[rowKey(chave, emp, fil)], nil
 }
 func (f *fakeFB) NextChaveID(context.Context) (int64, error) { f.nextID++; return f.nextID, nil }
+func (f *fakeFB) DeleteOurRows(_ context.Context, chave, _ string) (int64, error) {
+	var n int64
+	for k := range f.rows {
+		if strings.HasPrefix(k, chave+"|") {
+			delete(f.rows, k)
+			n++
+		}
+	}
+	return n, nil
+}
 func (f *fakeFB) InsertChaveAcesso(_ context.Context, _ int64, r firebird.InsertRow) error {
 	if f.failInsert {
 		return fmt.Errorf("firebird indisponível (simulado)")
@@ -322,6 +332,52 @@ func TestPlanFile_JanelaDeEmissao(t *testing.T) {
 
 // Allowlist na varredura: participação fora da lista descarta o arquivo INTEIRO
 // (multi-participação não sincroniza pela metade).
+// Rollback (§10): desfaz um sync real — apaga NOSSAS linhas, restaura a origem,
+// apaga as cópias do destino e emite sync_failed "rollback manual".
+func TestRollback_DesfazSync(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, false) // modo real
+	origem := writeXML(t, arrival, "nota.xml", nfeXML(chaveTeste, cnpjA, cnpjB))
+
+	if _, err := s.RunChave(context.Background(), chaveTeste, origem); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(fb.inserts) != 2 {
+		t.Fatalf("pré-condição: esperava 2 inserts, teve %d", len(fb.inserts))
+	}
+	if _, err := os.Stat(origem); !os.IsNotExist(err) {
+		t.Fatalf("pré-condição: origem deveria ter saído após o sync")
+	}
+
+	res, err := s.Rollback(context.Background(), chaveTeste)
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if res.RowsDeleted != 2 {
+		t.Errorf("RowsDeleted=%d; want 2", res.RowsDeleted)
+	}
+	for _, ef := range [][2]int{{100, 1}, {200, 1}} {
+		if has, _ := fb.HasRow(context.Background(), chaveTeste, ef[0], ef[1]); has {
+			t.Errorf("linha %d/%d deveria ter sido apagada", ef[0], ef[1])
+		}
+	}
+	if _, err := os.Stat(origem); err != nil {
+		t.Errorf("origem deveria ter sido restaurada: %v", err)
+	}
+	if res.FilesRestored != 1 || res.FilesDeleted != 2 {
+		t.Errorf("arquivos: restaurados=%d apagados=%d; want 1 e 2", res.FilesRestored, res.FilesDeleted)
+	}
+	var rb int
+	for _, o := range fb.obs {
+		if o.EventType == model.EventSyncFailed {
+			rb++
+		}
+	}
+	if rb != 2 {
+		t.Errorf("esperava 2 sync_failed de rollback, teve %d", rb)
+	}
+}
+
 // Devolução (tpNF=0): a empresa EMITE a nota mas é ENTRADA de mercadoria — o
 // DownloadXML arquiva em ENTRADA. Sem ler o tpNF, o syncer classificava como
 // saída (bug achado no check-plans: 385 divergências SAIDA×ENTRADA).
