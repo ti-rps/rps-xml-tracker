@@ -604,25 +604,133 @@ servidor. Como o segredo já esteve no histórico do git, **rotacionar a senha d
 (poller, `repoll` de investigação, syncer) e garantir o mínimo em cada — leitura
 para observação/auditoria, escrita só no syncer.
 
-## 14. Protocolo de segurança & redundância do piloto (a revisar antes do F2)
+## 14. Protocolo de segurança & redundância do piloto (fechado 2026-07-16)
 
-Esqueleto para a revisão conjunta (a detalhar). Objetivo: começar os testes sem
-sustos, com o mínimo de erro e recuperação sem dor de cabeça.
+Objetivo: começar o F2 sem sustos, com o mínimo de erro e recuperação sem dor de
+cabeça. Revisão conduzida contra o código; os itens (a)–(f) do esqueleto foram
+resolvidos abaixo.
 
-**Salvaguardas já no código (herança do F1):** dry-run é o default; `ENABLED`
-trava o binário; modo real exige `TRACKER_FB_WRITE_DSN`; ordem à prova de crash
+### 14.0 Salvaguardas já no código (herança do F1)
+
+Dry-run é o default (`TRACKER_SYNCER_DRY_RUN != "false"`); `ENABLED` trava o
+binário; modo real exige `TRACKER_FB_WRITE_DSN`; ordem à prova de crash
 (`copy .tracker-tmp → verify → rename → INSERT → delete origem`); nunca
 sobrescreve destino divergente (conflito → intervenção manual); nunca apaga a
 origem sem destino verificado + linha presente; journal bbolt durável;
-`IMPORTADO=0` em todo INSERT; marcador `OBSERVACOES` em toda linha nossa.
+`IMPORTADO=0` em todo INSERT; TIPODOCUMENTO/TIPO ficam NULL (não disparam a
+trigger `CHECK_FORCAIMPORTACAO`); marcador `OBSERVACOES STARTING WITH
+'sync rps-xml-tracker'` em toda linha nossa. As 3 observações independentes
+(agente/poller/syncer) cross-checam cada efeito; no F2 o DownloadXML segue ligado
+como rede.
 
-**Recuperação:** `syncer --rollback <chave> --yes` (§10) desfaz enquanto
-`IMPORTADO=0`; as 3 observações independentes (agente/poller/syncer) cross-checam
-cada efeito; no F2 o DownloadXML segue ligado como rede.
+**Invariante de reversibilidade:** o syncer só faz duas coisas no banco —
+INSERT de linha com marcador (IMPORTADO=0) e DELETE de linha com marcador +
+IMPORTADO=0. Nunca UPDATE, nunca toca linha de terceiro, nunca toca linha já
+importada. Logo TUDO que inserimos é identificável e desfazível pelo marcador
+enquanto o Horse não importou.
 
-**A definir na revisão (candidatos):** (a) backup/snapshot da `TABLISTACHAVEACESSO`
-antes do 1º write; (b) auditoria em lote das nossas linhas pelo marcador
-(listar/contar tudo que inserimos — e rollback em massa se preciso); (c)
-critério de escolha e nº da cobaia; (d) teste do próprio rollback numa chave de
-mentira antes do 1º real; (e) matriz "o que pode dar errado → resposta"; (f)
-limites operacionais (`MAX_PER_CYCLE`, allowlist estreita) no arranque.
+### 14.1 Auditoria + rollback em massa por marcador (item a/b — IMPLEMENTADO)
+
+- `syncer --audit [--since AAAA-MM-DD]` — **READ-ONLY** (só `TRACKER_FB_DSN`, sem
+  ENABLED): conta as nossas linhas, split `IMPORTADO=0` (desfazíveis) /
+  `IMPORTADO=1` (já no livro). ⚠️ `OBSERVACOES` não é indexado — SEM `--since` a
+  query VARRE a tabela inteira (milhões de linhas); em expediente passe `--since`
+  (usa o índice de `DATAINCLUSAO`; nossas linhas só existem do F2 em diante).
+- `syncer --audit --dump manifesto.jsonl` — grava um manifesto JSONL de cada
+  linha nossa (chave, empresa/filial, importado, data_inclusao, url) — o registro
+  durável de tudo que causamos (item b da redundância).
+- `syncer --rollback-all --yes` — **DESTRUTIVO** (ENABLED + writer + `--yes`):
+  enumera as chaves pendentes pelo banco e roda o rollback por chave (cada DELETE
+  chave-scoped). **Conservador:** chave sem journal local ou com participação já
+  importada é **PULADA** (contada em `puladas=`, com aviso), nunca desfeita pela
+  metade — apagar a linha sem restaurar o arquivo deixaria o XML órfão no
+  SINCRONIZADO. Limitado às nossas linhas `IMPORTADO=0`.
+- `syncer --rollback <chave> --yes` — single-key do §10. **Guarda de importada:**
+  se qualquer participação da chave já entrou no livro, apaga só as pendentes e
+  **preserva os arquivos** (o XML importado segue referenciado; reinjetar a origem
+  arriscaria duplicata) — reporta parcial e pede verificação manual.
+
+### 14.2 Snapshot antes do 1º write (item a — gbak no servidor)
+
+O net verdadeiro (contra bug em WHERE de DELETE futuro ou SQL manual sob SYSDBA) é
+um backup nativo, feito UMA VEZ na SRVIMPORT/servidor do Firebird ANTES do 1º
+write real. O `gbak` roda numa transação de leitura consistente — não trava a
+tabela nem os writers do DownloadXML:
+
+```bat
+REM no servidor do Firebird, com a credencial SYSDBA:
+gbak -b -g -user SYSDBA -password <senha> <host>:<caminho_do_.fdb> D:\backups\athenas-pre-shadowsync-2026-07-16.fbk
+REM -g desliga o garbage collect durante o backup (mais rápido, sem tocar o estado)
+REM verificar que o arquivo .fbk foi criado e tem tamanho compatível antes de prosseguir
+```
+
+Guardar o `.fbk` FORA da máquina (o disco pode ser o ponto de falha). Restauração
+de emergência (para um arquivo NOVO, jamais por cima do banco vivo sem combinar):
+`gbak -c -user SYSDBA -password <senha> athenas-pre-shadowsync-2026-07-16.fbk <host>:D:\restore\athenas-restore.fdb`.
+
+O manifesto contínuo (14.1) complementa: mesmo sem restaurar o banco inteiro, ele
+diz exatamente quais linhas remover.
+
+### 14.3 Teste do próprio rollback antes do 1º real (item d — IMPLEMENTADO)
+
+`syncer --selftest-rollback --yes` (ENABLED + writer + `--yes`, **serviço parado**):
+insere UMA linha-isca sintética (chave `99…9` de 44 dígitos — UF 99 inexistente,
+nunca é nota real → o Horse não importa; ancorada numa filial real p/ não esbarrar
+em FK), confirma que apareceu, roda o mesmo DELETE-por-marcador do rollback,
+confirma que sumiu E que a contagem **TOTAL** das nossas linhas voltou ao ponto de
+partida (prova que o filtro pegou SÓ a isca). Compara o total, não os pendentes:
+o Horse é independente e um import no meio do teste mexeria no split
+pendente/importada mas não no total — assim o robô não gera falso negativo que
+travaria o go-live. Sai com erro se qualquer passo não bater. Não mexe em arquivo.
+
+### 14.4 Cobaia do F2 (item c)
+
+**Empresa 500 — COMERCIAL BAHIANO DE ALIMENTOS.** Critério: alta atividade
+(5.841 participações nos planos ⇒ chave fresca não-sincronizada é fácil de achar),
+NFCe-saída (participação única, própria filial — o caso mais simples), e o
+cadastro comprovadamente importa (a URL bateu no `--check-plans` contra o que o
+DownloadXML fez). **Descartada a candidata original do §8 (EMPRESA TESTE 996):** o
+§12.1 mostrou que 996 é conta-lixo SIEG "pega-tudo", péssima cobaia. Confirmar na
+hora que a chave escolhida ainda está na ASINCRONIZAR e o DownloadXML ainda não
+pegou (§8 passo 2).
+
+### 14.5 Matriz "o que pode dar errado → resposta"
+
+| # | Falha | Estado resultante | Resposta |
+|---|---|---|---|
+| 1 | Crash entre copy e rename | `.tracker-tmp` órfão; origem intacta | Retry limpa o tmp e recomeça; DownloadXML nunca disputa `.tracker-tmp` |
+| 2 | Crash entre rename e INSERT | Arquivo no destino, sem linha | Horse não importa ainda; retry só refaz o INSERT (pre-check vê o destino ok) |
+| 3 | Crash no delete da origem | Arquivo nos 2 lados + linha ok | Retry só deleta; se DownloadXML pegar a origem, é o mesmo `<CHAVE>.xml` (conteúdo idêntico) e linha extra é normal na tabela |
+| 4 | Destino já existe com conteúdo DIVERGENTE | — | `sync_failed` "conflito"; NUNCA sobrescreve; intervenção manual |
+| 5 | Rollback de nota com participação já importada | Linha importada + arquivo referenciado pelo livro | Guarda de importada: apaga só as pendentes, **preserva os arquivos**, reporta parcial; a linha `IMPORTADO=1` é estorno fiscal (fora do escopo) → escalar |
+| 5b | `--rollback-all` acha chave sem journal local | Não dá pra restaurar o arquivo | **Pulada** (contada em `puladas=`); resolver com `--rollback <chave>` single-key informando o arquivo |
+| 6 | Derivação de URL errada (pasta errada) | Arquivo no lugar errado + linha | `--check-plans` mede isso ANTES; se escapar, `--rollback <chave>` restaura e apaga o destino errado |
+| 7 | Direção errada (devolução tpNF) | Entrada↔Saída trocada | Corrigido no §12.7 (lê `<tpNF>`); `--rollback` se escapar |
+| 8 | Emissão fora da janela do Horse | Linha `IMPORTADO=0` eterna (lixo) | Bloqueado por default (`dentroDaJanela`); só com `--allow-stale` |
+| 9 | Mojibake em nome acentuado | Athenas exibe errado | `toLatin1` na borda; runa fora do Latin-1 vira `?` visível, não mojibake |
+| 10 | Sessão Firebird morta pelo admin | — | Reader tem retry/expiração de ociosas; Writer NÃO retenta (evita INSERT duplicado) — a falha sobe e o Execute retoma pelos pre-checks |
+| 11 | Sync em massa descontrolado | Muitas linhas nossas | F2 é single-key manual (não faz loop); `--audit` a qualquer hora; `--rollback-all` desfaz tudo pendente |
+| 12 | Banco corrompido / desastre | — | gbak pré-F2 (14.2) + manifesto contínuo |
+
+### 14.6 Limites de arranque (item f)
+
+- **F2 é single-key manual:** `syncer --chave <44> --file <path>` roda UMA vez e
+  sai — não há loop de serviço, não passa por allowlist, uma chave por vez à mão.
+- **Se/quando ligar a varredura (F3):** `TRACKER_SYNCER_MAX_PER_CYCLE=1`,
+  allowlist estreita (`TRACKER_SYNCER_EMPRESAS=500`), DownloadXML ainda ligado como
+  rede. Crescer devagar (empresa → grupo → tudo) medindo pelo reconcile.
+
+### 14.7 Roteiro do F2 (ordem de execução)
+
+1. `syncer --audit --since <data-início-F2>` — foto inicial (deve dar total=0 antes do 1º write).
+2. `gbak` de backup no servidor (14.2) + guardar o `.fbk` fora da máquina.
+3. `syncer --selftest-rollback --yes` (serviço parado) → tem de sair "SELFTEST OK".
+4. `syncer --audit --since <data> --dump manifesto-inicial.jsonl` — linha-base do manifesto.
+5. Escolher a chave-cobaia (empresa 500, §14.4); `syncer --dry-run --chave … --file …`
+   → conferir o plano.
+6. `repoll --watch-chave <chave>` em paralelo (SRVRPS03).
+7. `syncer --chave <chave> --file <path>` (ENABLED=true, DRY_RUN=false) → executa.
+8. Verificar (§8 passo 6): arquivo no destino, linha na tabela, timeline com
+   sync_moved+sync_db_inserted+file_moved+seen_pending, depois `imported`.
+9. Se algo destoar: `syncer --rollback <chave> --yes` desfaz; `syncer --audit`
+   confirma que voltou ao zero.

@@ -13,6 +13,10 @@
 //	--dry-run             só planeja e loga/grava o plano; NENHUMA escrita (modo da F1)
 //	--chave <44> --file <path>   sincroniza SÓ essa chave (gatilho do piloto F2)
 //	--once                uma varredura e sai (sem loop)
+//	--audit [--since d] [--dump f]  READ-ONLY: conta as nossas linhas (marcador); --since escopa (índice); --dump grava manifesto JSONL
+//	--rollback <44> --yes DESTRUTIVO: desfaz o sync dessa chave (§10)
+//	--rollback-all --yes  DESTRUTIVO: rollback em lote de TODAS as nossas linhas IMPORTADO=0 (§14.1)
+//	--selftest-rollback --yes  insere+desfaz uma isca sintética; testa o rollback na tabela real (§14.3)
 //
 // Config (env):
 //
@@ -253,7 +257,12 @@ func main() {
 	once := flag.Bool("once", false, "uma varredura e sai")
 	allowStale := flag.Bool("allow-stale", false, "permite emissão fora da janela do AthenasHorse (mês atual+anterior)")
 	rollbackChave := flag.String("rollback", "", "DESTRUTIVO: desfaz a sincronização desta chave (apaga NOSSAS linhas IMPORTADO=0, restaura o arquivo na ASINCRONIZAR); exige --yes")
-	yes := flag.Bool("yes", false, "confirma a operação destrutiva do --rollback")
+	rollbackAll := flag.Bool("rollback-all", false, "DESTRUTIVO: rollback EM LOTE de TODAS as nossas linhas IMPORTADO=0; exige --yes")
+	selftest := flag.Bool("selftest-rollback", false, "insere uma linha-isca sintética e a desfaz — testa INSERT+rollback na tabela real; exige --yes")
+	audit := flag.Bool("audit", false, "READ-ONLY: conta as nossas linhas (marcador), split IMPORTADO=0/1")
+	dump := flag.String("dump", "", "com --audit: grava manifesto JSONL de TODAS as nossas linhas nesse arquivo")
+	since := flag.String("since", "", "com --audit: escopa por DATAINCLUSAO >= YYYY-MM-DD (usa índice; vazio = full scan da tabela)")
+	yes := flag.Bool("yes", false, "confirma a operação destrutiva (--rollback / --rollback-all / --selftest-rollback)")
 	flag.Parse()
 
 	// Dry-run é o DEFAULT: o modo real exige TRACKER_SYNCER_DRY_RUN=false
@@ -262,6 +271,13 @@ func main() {
 	dryRun := *dryRunFlag || getenv("TRACKER_SYNCER_DRY_RUN", "true") != "false"
 
 	verb := flag.Arg(0)
+
+	// --audit é READ-ONLY: roda ANTES da trava ENABLED e só precisa do DSN de
+	// leitura (é a ferramenta de "quanto já inserimos", segura a qualquer hora).
+	if *audit {
+		runAudit(*dump, *since)
+		return
+	}
 
 	// A trava geral: sem ENABLED o binário sai — ninguém liga o syncer sem querer.
 	// (Verbos de serviço passam: install/uninstall não tocam em nada.)
@@ -319,6 +335,50 @@ func main() {
 		return
 	}
 
+	// Rollback EM LOTE (§14): desfaz TODAS as nossas linhas IMPORTADO=0. Modo
+	// REAL (writer p/ o DELETE); exige --yes além do ENABLED.
+	if *rollbackAll {
+		if !*yes {
+			log.Fatal("--rollback-all é destrutivo (apaga linhas e mexe em arquivos) — confirme com --yes")
+		}
+		prg.build(false, true)
+		defer prg.closeAll()
+		res, err := prg.sn.RollbackAll(prg.ctx)
+		if err != nil {
+			log.Fatalf("rollback-all: %v", err)
+		}
+		log.Printf("rollback-all concluído: desfeitas=%d linhas_apagadas=%d origens_restauradas=%d destinos_apagados=%d puladas=%d falhas=%d",
+			res.Chaves, res.RowsDeleted, res.FilesRestored, res.FilesDeleted, res.Skipped, res.Failures)
+		for _, w := range res.Warnings {
+			log.Printf("  aviso: %s", w)
+		}
+		if res.Skipped > 0 {
+			log.Printf("ATENÇÃO: %d chave(s) PULADA(S) (sem journal local ou já importada) — precisam de ação manual (ver avisos)", res.Skipped)
+		}
+		return
+	}
+
+	// Auto-teste do rollback (§14): insere e desfaz uma isca sintética na tabela
+	// real ANTES do 1º sync de verdade. Modo REAL; exige --yes.
+	if *selftest {
+		if !*yes {
+			log.Fatal("--selftest-rollback insere e apaga uma linha real — confirme com --yes")
+		}
+		prg.build(false, true)
+		defer prg.closeAll()
+		res, err := prg.sn.SelfTestRollback(prg.ctx)
+		if err != nil {
+			log.Fatalf("selftest-rollback: %v", err)
+		}
+		log.Printf("selftest: chave=%s empresa=%d/%d inserida=%v apagadas=%d total_antes=%d total_depois=%d",
+			res.Chave, res.Empresa, res.Filial, res.Inserted, res.RowsDeleted, res.TotalBefore, res.TotalAfter)
+		if !res.OK {
+			log.Fatal("SELFTEST FALHOU — o rollback NÃO se comportou como esperado; NÃO prossiga para o sync real")
+		}
+		log.Print("SELFTEST OK — INSERT + rollback verificados na tabela real; a contagem geral não mudou")
+		return
+	}
+
 	// Gatilho single-key (piloto F2): roda uma vez e sai, sem loop de serviço.
 	if *chave != "" {
 		prg.build(dryRun, *allowStale)
@@ -343,6 +403,33 @@ func main() {
 	}
 	if err := svc.Run(); err != nil {
 		log.Fatalf("run: %v", err)
+	}
+}
+
+// runAudit abre SÓ a conexão de leitura (TRACKER_FB_DSN), conta as nossas linhas
+// e, com --dump, grava o manifesto. Nenhuma escrita — não exige ENABLED nem o
+// TRACKER_FB_WRITE_DSN, então roda em qualquer máquina com o DSN de leitura.
+// Sem --since a query varre a tabela inteira (OBSERVACOES não é indexado) — passe
+// --since em horário de expediente; nossas linhas só existem do F2 em diante.
+func runAudit(dumpPath, since string) {
+	var sinceT time.Time
+	if since != "" {
+		t, err := time.Parse("2006-01-02", since)
+		if err != nil {
+			log.Fatalf("--since inválido (use YYYY-MM-DD): %v", err)
+		}
+		sinceT = t
+	} else {
+		log.Print("AVISO: --audit sem --since varre a TABLISTACHAVEACESSO inteira (tabela grande) — rode em horário calmo ou passe --since YYYY-MM-DD")
+	}
+	ctx := context.Background()
+	rd, err := firebird.NewReader(ctx, mustEnv("TRACKER_FB_DSN"))
+	if err != nil {
+		log.Fatalf("firebird (ro): %v", err)
+	}
+	defer rd.Close()
+	if _, err := syncer.AuditRows(ctx, rd, dumpPath, sinceT, log.Printf); err != nil {
+		log.Fatalf("audit: %v", err)
 	}
 }
 

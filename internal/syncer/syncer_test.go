@@ -36,6 +36,7 @@ type fakeFB struct {
 	filiais     []firebird.Filial
 	nomes       map[int]string
 	rows        map[string]bool // "chave|emp/fil"
+	imported    map[string]bool // subconjunto de rows com IMPORTADO=1 (Horse importou)
 	inserts     []firebird.InsertRow
 	nextID      int64
 	failInsert  bool
@@ -56,16 +57,47 @@ func (f *fakeFB) EmpresaNomes(context.Context) (map[int]string, error) { return 
 func (f *fakeFB) HasRow(_ context.Context, chave string, emp, fil int) (bool, error) {
 	return f.rows[rowKey(chave, emp, fil)], nil
 }
+func (f *fakeFB) HasImportedRow(_ context.Context, chave, _ string) (bool, error) {
+	for k := range f.imported {
+		if strings.HasPrefix(k, chave+"|") && f.rows[k] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (f *fakeFB) NextChaveID(context.Context) (int64, error) { f.nextID++; return f.nextID, nil }
 func (f *fakeFB) DeleteOurRows(_ context.Context, chave, _ string) (int64, error) {
 	var n int64
 	for k := range f.rows {
-		if strings.HasPrefix(k, chave+"|") {
+		if strings.HasPrefix(k, chave+"|") && !f.imported[k] { // espelha o filtro IMPORTADO=0
 			delete(f.rows, k)
 			n++
 		}
 	}
 	return n, nil
+}
+func (f *fakeFB) CountOurRows(context.Context, string, time.Time) (firebird.OurRowsCount, error) {
+	total := int64(len(f.rows))
+	var imp int64
+	for k := range f.rows {
+		if f.imported[k] {
+			imp++
+		}
+	}
+	return firebird.OurRowsCount{Total: total, Pending: total - imp, Imported: imp}, nil
+}
+func (f *fakeFB) ListOurRows(_ context.Context, _ string, onlyPending bool, _ time.Time) ([]firebird.OurRow, error) {
+	var out []firebird.OurRow
+	for k := range f.rows {
+		if onlyPending && f.imported[k] {
+			continue
+		}
+		parts := strings.SplitN(k, "|", 2)
+		var emp, fil int
+		fmt.Sscanf(parts[1], "%d/%d", &emp, &fil)
+		out = append(out, firebird.OurRow{Chave: parts[0], CodigoEmpresa: emp, CodigoFilial: fil})
+	}
+	return out, nil
 }
 func (f *fakeFB) InsertChaveAcesso(_ context.Context, _ int64, r firebird.InsertRow) error {
 	if f.failInsert {
@@ -86,8 +118,9 @@ func newFake() *fakeFB {
 			{CodigoEmpresa: 100, CodigoFilial: 1, Cnpj: cnpjA},
 			{CodigoEmpresa: 200, CodigoFilial: 1, Cnpj: cnpjB},
 		},
-		nomes: map[int]string{100: "EMPRESA A LTDA", 200: "EMPRESA B & FILHOS"},
-		rows:  map[string]bool{},
+		nomes:    map[int]string{100: "EMPRESA A LTDA", 200: "EMPRESA B & FILHOS"},
+		rows:     map[string]bool{},
+		imported: map[string]bool{},
 	}
 }
 
@@ -375,6 +408,136 @@ func TestRollback_DesfazSync(t *testing.T) {
 	}
 	if rb != 2 {
 		t.Errorf("esperava 2 sync_failed de rollback, teve %d", rb)
+	}
+}
+
+// RollbackAll enumera as chaves pendentes pelo banco e desfaz cada uma; cada
+// DELETE segue chave-scoped e o arquivo é restaurado por chave.
+func TestRollbackAll_DesfazTodasPendentes(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, false) // modo real
+	// duas notas de empresas diferentes, ambas sincronizadas.
+	chave2 := "352607" + strings.Repeat("2", 38)
+	o1 := writeXML(t, arrival, "n1.xml", nfeXML(chaveTeste, cnpjA, cnpjB))
+	o2 := writeXML(t, arrival, "n2.xml", nfeXML(chave2, cnpjA, cnpjB))
+	for _, c := range []struct{ ch, f string }{{chaveTeste, o1}, {chave2, o2}} {
+		if _, err := s.RunChave(context.Background(), c.ch, c.f); err != nil {
+			t.Fatalf("sync %s: %v", c.ch, err)
+		}
+	}
+	if len(fb.rows) != 4 { // 2 chaves × 2 participações
+		t.Fatalf("pré-condição: esperava 4 linhas, teve %d", len(fb.rows))
+	}
+
+	res, err := s.RollbackAll(context.Background())
+	if err != nil {
+		t.Fatalf("rollback-all: %v", err)
+	}
+	if res.Chaves != 2 || res.RowsDeleted != 4 {
+		t.Errorf("chaves=%d linhas=%d; want 2 e 4", res.Chaves, res.RowsDeleted)
+	}
+	if res.Failures != 0 {
+		t.Errorf("falhas=%d; want 0 (avisos: %v)", res.Failures, res.Warnings)
+	}
+	if len(fb.rows) != 0 {
+		t.Errorf("todas as linhas deveriam ter sumido, restaram %d", len(fb.rows))
+	}
+	for _, o := range []string{o1, o2} {
+		if _, err := os.Stat(o); err != nil {
+			t.Errorf("origem %s deveria ter sido restaurada: %v", o, err)
+		}
+	}
+}
+
+// Guarda de importada: numa nota multi-participação com UMA participação já
+// importada (IMPORTADO=1), o rollback apaga só a pendente e NÃO toca em arquivo
+// (o XML importado segue referenciado pelo livro). Achado do code-review.
+func TestRollback_ParticipacaoImportada_PreservaArquivos(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, false) // modo real
+	o := writeXML(t, arrival, "n.xml", nfeXML(chaveTeste, cnpjA, cnpjB))
+	plan, err := s.RunChave(context.Background(), chaveTeste, o)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if len(plan.Participacoes) != 2 || len(fb.rows) != 2 {
+		t.Fatalf("pré-condição: 2 participações/linhas; teve %d/%d", len(plan.Participacoes), len(fb.rows))
+	}
+	// o Horse importou a 1ª participação.
+	imp := plan.Participacoes[0]
+	fb.imported[rowKey(chaveTeste, imp.CodigoEmpresa, imp.CodigoFilial)] = true
+
+	res, err := s.Rollback(context.Background(), chaveTeste)
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if !res.Skipped || res.SkipReason == "" {
+		t.Errorf("esperava Skipped com motivo (participação importada); res=%+v", res)
+	}
+	if res.RowsDeleted != 1 {
+		t.Errorf("RowsDeleted=%d; want 1 (só a pendente)", res.RowsDeleted)
+	}
+	if res.FilesRestored != 0 || res.FilesDeleted != 0 {
+		t.Errorf("arquivos NÃO deviam ser tocados; restaurados=%d apagados=%d", res.FilesRestored, res.FilesDeleted)
+	}
+	if !fb.rows[rowKey(chaveTeste, imp.CodigoEmpresa, imp.CodigoFilial)] {
+		t.Error("a linha IMPORTADA foi apagada — não deveria")
+	}
+	for _, p := range plan.Participacoes {
+		if _, err := os.Stat(p.DestAbs); err != nil {
+			t.Errorf("destino %s deveria estar preservado: %v", p.DestAbs, err)
+		}
+	}
+	// nenhum sync_failed de rollback (não desfizemos de verdade).
+	for _, ob := range fb.obs {
+		if ob.EventType == model.EventSyncFailed {
+			t.Error("não deveria emitir sync_failed de rollback numa chave importada")
+		}
+	}
+}
+
+// RollbackAll pula (sem apagar) chaves sem registro no journal local — apagar a
+// linha deixaria o XML órfão no SINCRONIZADO. Achado do code-review.
+func TestRollbackAll_SemJournal_Pula(t *testing.T) {
+	fb := newFake()
+	s, _, _ := newSyncer(t, fb, false)
+	// linha pendente no banco SEM entrada no journal (ex.: outra máquina/instância).
+	fb.rows[rowKey(chaveTeste, 100, 1)] = true
+
+	res, err := s.RollbackAll(context.Background())
+	if err != nil {
+		t.Fatalf("rollback-all: %v", err)
+	}
+	if res.Skipped != 1 || res.Chaves != 0 || res.RowsDeleted != 0 {
+		t.Errorf("esperava pular sem apagar: puladas=%d desfeitas=%d apagadas=%d", res.Skipped, res.Chaves, res.RowsDeleted)
+	}
+	if !fb.rows[rowKey(chaveTeste, 100, 1)] {
+		t.Error("a linha foi apagada sem journal — deixaria o XML órfão")
+	}
+}
+
+// SelfTestRollback insere uma isca sintética e a desfaz, verificando que a
+// contagem geral não mudou (o filtro só pegou a isca).
+func TestSelfTestRollback_OK(t *testing.T) {
+	fb := newFake()
+	s, _, _ := newSyncer(t, fb, false) // modo real
+
+	res, err := s.SelfTestRollback(context.Background())
+	if err != nil {
+		t.Fatalf("selftest: %v", err)
+	}
+	if !res.OK {
+		t.Errorf("OK=false; inserida=%v apagadas=%d total_antes=%d total_depois=%d",
+			res.Inserted, res.RowsDeleted, res.TotalBefore, res.TotalAfter)
+	}
+	if res.RowsDeleted != 1 {
+		t.Errorf("RowsDeleted=%d; want 1", res.RowsDeleted)
+	}
+	if len(fb.rows) != 0 {
+		t.Errorf("a isca deveria ter sumido, restaram %d linhas", len(fb.rows))
+	}
+	if res.Chave != selfTestChave {
+		t.Errorf("chave=%q; want a isca sintética", res.Chave)
 	}
 }
 
