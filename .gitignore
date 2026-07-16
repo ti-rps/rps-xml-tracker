@@ -1,6 +1,8 @@
 # compiled binaries
 /api
 /tracker-api
+/repoll
+/syncer
 *.exe
 # local env / secrets
 .env

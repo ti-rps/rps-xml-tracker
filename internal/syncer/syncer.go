@@ -32,6 +32,9 @@ type resolver interface {
 	ListFiliais(ctx context.Context) ([]firebird.Filial, error)
 	EmpresaNomes(ctx context.Context) (map[int]string, error)
 	HasRow(ctx context.Context, chave string, codigoEmpresa, codigoFilial int) (bool, error)
+	HasImportedRow(ctx context.Context, chave, markerPrefix string) (bool, error)
+	CountOurRows(ctx context.Context, markerPrefix string, since time.Time) (firebird.OurRowsCount, error)
+	ListOurRows(ctx context.Context, markerPrefix string, onlyPending bool, since time.Time) ([]firebird.OurRow, error)
 }
 
 // inserter é a escrita no Firebird (implementada por *firebird.Writer; nil no dry-run).

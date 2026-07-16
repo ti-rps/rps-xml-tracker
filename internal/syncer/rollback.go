@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
 )
@@ -20,6 +21,8 @@ type RollbackResult struct {
 	RowsDeleted   int64
 	FilesRestored int
 	FilesDeleted  int
+	Skipped       bool   // não desfez (sem journal no bulk, ou já importada) — ver SkipReason
+	SkipReason    string // motivo do skip (vazio se não pulou)
 	Warnings      []string
 }
 
@@ -27,9 +30,20 @@ type RollbackResult struct {
 // IMPORTADO=0 (§10 do plano): (1) apaga as NOSSAS linhas ainda não importadas,
 // (2) restaura o arquivo na ASINCRONIZAR e apaga a(s) cópia(s) no SINCRONIZADO,
 // (3) emite sync_failed "rollback manual" na timeline. É a única operação
-// destrutiva do syncer — o chamador exige --yes. Se o Horse já importou, o
-// filtro IMPORTADO=0 protege a linha (não some) e o resultado reporta 0 apagadas.
+// destrutiva do syncer — o chamador exige --yes. Se QUALQUER participação da chave
+// já foi importada, a guarda de importada (rollbackOne) apaga só as pendentes e
+// PRESERVA os arquivos (a linha importada referencia o XML) — reporta parcial.
 func (s *Syncer) Rollback(ctx context.Context, chave string) (RollbackResult, error) {
+	return s.rollbackOne(ctx, chave, false)
+}
+
+// rollbackOne é o rollback de UMA chave. requireJournal=true (usado pelo
+// RollbackAll em lote) recusa desfazer uma chave que não está no journal local:
+// sem o journal não dá para restaurar o arquivo, e apagar só a linha do banco
+// deixaria o XML órfão no SINCRONIZADO, fora da fila de importação (achado do
+// code-review). O single-key (requireJournal=false) mantém o comportamento antigo
+// — o operador mira uma chave conhecida e aceita o aviso de arquivo manual.
+func (s *Syncer) rollbackOne(ctx context.Context, chave string, requireJournal bool) (RollbackResult, error) {
 	res := RollbackResult{Chave: chave}
 	if s.cfg.DryRun {
 		return res, fmt.Errorf("rollback não roda em dry-run (precisa da escrita real)")
@@ -37,11 +51,44 @@ func (s *Syncer) Rollback(ctx context.Context, chave string) (RollbackResult, er
 	if s.wr == nil {
 		return res, fmt.Errorf("rollback exige a conexão de escrita (TRACKER_FB_WRITE_DSN)")
 	}
+	if len(chave) != 44 {
+		res.Skipped, res.SkipReason = true, "chave sem 44 dígitos — pulada (não toca em nada)"
+		res.Warnings = append(res.Warnings, res.SkipReason)
+		return res, nil
+	}
 
 	parts := s.jr.partsForChave(chave)
 	if len(parts) == 0 {
+		if requireJournal {
+			res.Skipped, res.SkipReason = true,
+				"sem registro no journal local — pulada no lote; use --rollback <chave> single-key com o arquivo à mão"
+			res.Warnings = append(res.Warnings, res.SkipReason)
+			return res, nil
+		}
 		res.Warnings = append(res.Warnings,
 			"sem registro no journal — só o DELETE do banco será tentado; qualquer arquivo é intervenção manual")
+	}
+
+	// Guarda de importada: se QUALQUER participação nossa já entrou no livro
+	// (IMPORTADO=1), os arquivos NÃO podem ser mexidos — a linha importada
+	// referencia o XML no SINCRONIZADO, e restaurar a origem arriscaria duplicata.
+	// Ainda apagamos as linhas pendentes (DeleteOurRows filtra IMPORTADO=0), mas
+	// sem tocar em arquivo e sem timeline de "desfeito".
+	hasImported, err := s.rd.HasImportedRow(ctx, chave, MarkerPrefix)
+	if err != nil {
+		return res, fmt.Errorf("pre-check de importada: %w", err)
+	}
+	if hasImported {
+		n, derr := s.wr.DeleteOurRows(ctx, chave, MarkerPrefix)
+		if derr != nil {
+			return res, fmt.Errorf("DELETE das linhas pendentes: %w", derr)
+		}
+		res.RowsDeleted = n
+		res.Skipped, res.SkipReason = true,
+			fmt.Sprintf("chave com participação IMPORTADA — apagadas %d linha(s) pendente(s); ARQUIVOS preservados; verifique manualmente (estorno é fiscal)", n)
+		res.Warnings = append(res.Warnings, res.SkipReason)
+		s.cfg.Log("ROLLBACK chave=%s PARCIAL (importada): linhas_pendentes_apagadas=%d arquivos_preservados", chave, n)
+		return res, nil
 	}
 
 	// passo 1: apaga só as NOSSAS linhas ainda não importadas.
@@ -92,6 +139,70 @@ func (s *Syncer) Rollback(ctx context.Context, chave string) (RollbackResult, er
 	}
 	s.cfg.Log("ROLLBACK chave=%s linhas_apagadas=%d origem_restaurada=%d destinos_apagados=%d avisos=%d",
 		chave, res.RowsDeleted, res.FilesRestored, res.FilesDeleted, len(res.Warnings))
+	return res, nil
+}
+
+// RollbackAllResult resume o rollback em massa (§14 item ①).
+type RollbackAllResult struct {
+	Chaves        int      // chaves distintas EFETIVAMENTE desfeitas (linha apagada + arquivo tratado)
+	RowsDeleted   int64    // total de linhas apagadas
+	FilesRestored int      // origens restauradas
+	FilesDeleted  int      // destinos apagados
+	Skipped       int      // chaves puladas (sem journal / já importada) — precisam de ação manual
+	Failures      int      // chaves cujo rollback deu erro
+	Warnings      []string // avisos (prefixados com a chave)
+}
+
+// RollbackAll desfaz, EM LOTE, todas as NOSSAS linhas ainda não importadas
+// (IMPORTADO=0 + marcador): enumera as chaves pendentes pelo banco e roda o
+// rollbackOne(requireJournal=true) por chave — cada DELETE segue chave-scoped
+// (nunca um único DELETE que varre a tabela). Conservador de propósito: chave sem
+// journal local ou com participação já importada é PULADA (contada em Skipped, com
+// aviso), nunca desfeita pela metade. Mesmo "all" é limitado às nossas linhas
+// não-importadas. O chamador exige --yes.
+func (s *Syncer) RollbackAll(ctx context.Context) (RollbackAllResult, error) {
+	var res RollbackAllResult
+	if s.cfg.DryRun {
+		return res, fmt.Errorf("rollback-all não roda em dry-run (precisa da escrita real)")
+	}
+	if s.wr == nil {
+		return res, fmt.Errorf("rollback-all exige a conexão de escrita (TRACKER_FB_WRITE_DSN)")
+	}
+	rows, err := s.rd.ListOurRows(ctx, MarkerPrefix, true, time.Time{}) // só IMPORTADO=0
+	if err != nil {
+		return res, fmt.Errorf("listar nossas linhas pendentes: %w", err)
+	}
+	seen := map[string]bool{}
+	var chaves []string
+	for _, r := range rows {
+		if r.Chave == "" || seen[r.Chave] {
+			continue
+		}
+		seen[r.Chave] = true
+		chaves = append(chaves, r.Chave)
+	}
+	s.cfg.Log("ROLLBACK-ALL iniciando: %d linha(s) pendente(s) em %d chave(s) distinta(s)", len(rows), len(chaves))
+	for _, ch := range chaves {
+		r, err := s.rollbackOne(ctx, ch, true)
+		if err != nil {
+			res.Failures++
+			res.Warnings = append(res.Warnings, ch+": "+err.Error())
+			continue
+		}
+		res.RowsDeleted += r.RowsDeleted
+		res.FilesRestored += r.FilesRestored
+		res.FilesDeleted += r.FilesDeleted
+		for _, w := range r.Warnings {
+			res.Warnings = append(res.Warnings, ch+": "+w)
+		}
+		if r.Skipped {
+			res.Skipped++
+		} else {
+			res.Chaves++
+		}
+	}
+	s.cfg.Log("ROLLBACK-ALL concluído: desfeitas=%d linhas_apagadas=%d origens_restauradas=%d destinos_apagados=%d puladas=%d falhas=%d",
+		res.Chaves, res.RowsDeleted, res.FilesRestored, res.FilesDeleted, res.Skipped, res.Failures)
 	return res, nil
 }
 

@@ -159,6 +159,130 @@ func (r *Reader) HasRow(ctx context.Context, chave string, codigoEmpresa, codigo
 	return has, err
 }
 
+// OurRowsCount é a contagem das linhas que ESTE tracker inseriu (marcador em
+// OBSERVACOES), separada pelo estado de importação — a auditoria em massa (§14).
+type OurRowsCount struct {
+	Total    int64 // todas as nossas linhas
+	Pending  int64 // IMPORTADO=0 (desfazíveis pelo rollback)
+	Imported int64 // IMPORTADO=1 (já no livro — estorno fiscal, fora do escopo)
+}
+
+// OurRow é uma linha nossa no manifesto de auditoria (--audit --dump).
+type OurRow struct {
+	Chave         string    `json:"chave"`
+	CodigoEmpresa int       `json:"codigo_empresa"`
+	CodigoFilial  int       `json:"codigo_filial"`
+	Importado     int       `json:"importado"`
+	DataInclusao  time.Time `json:"data_inclusao"`
+	URL           string    `json:"url"`
+}
+
+// CountOurRows conta TODAS as linhas com o nosso marcador, split por IMPORTADO.
+// READ-ONLY (credencial de leitura basta): é a foto de "quanto o tracker já
+// inseriu e quanto ainda dá para desfazer". markerPrefix vazio é recusado — sem
+// ele a contagem varreria a tabela inteira (linhas de terceiros).
+//
+// since != zero restringe a DATAINCLUSAO >= since. IMPORTANTE: `OBSERVACOES
+// STARTING WITH` não é indexado; sem `since` a query VARRE a TABLISTACHAVEACESSO
+// inteira (milhões de linhas) — rode só em horário calmo, ou passe --since para
+// aproveitar o índice de DATAINCLUSAO (nossas linhas só existem do F2 em diante).
+func (r *Reader) CountOurRows(ctx context.Context, markerPrefix string, since time.Time) (OurRowsCount, error) {
+	if markerPrefix == "" {
+		return OurRowsCount{}, fmt.Errorf("CountOurRows: markerPrefix vazio contaria linhas de terceiros")
+	}
+	q := `SELECT COUNT(*),
+	             SUM(CASE WHEN IMPORTADO = 0 THEN 1 ELSE 0 END),
+	             SUM(CASE WHEN IMPORTADO = 1 THEN 1 ELSE 0 END)
+	      FROM TABLISTACHAVEACESSO
+	      WHERE OBSERVACOES STARTING WITH ?`
+	args := []any{toLatin1(markerPrefix)}
+	if !since.IsZero() {
+		q += ` AND DATAINCLUSAO >= ?`
+		args = append(args, dateOnlyUTC(since))
+	}
+	var c OurRowsCount
+	err := r.retry(ctx, "contagem das nossas linhas", func(ctx context.Context) error {
+		var total int64
+		var pending, imported sql.NullInt64 // SUM de conjunto vazio é NULL
+		e := r.db.QueryRowContext(ctx, q, args...).Scan(&total, &pending, &imported)
+		if e != nil {
+			return e
+		}
+		c = OurRowsCount{Total: total, Pending: pending.Int64, Imported: imported.Int64}
+		return nil
+	})
+	return c, err
+}
+
+// HasImportedRow reporta se existe alguma linha NOSSA (marcador) já IMPORTADA
+// (IMPORTADO=1) para a chave. É a guarda do rollback: se qualquer participação
+// entrou no livro, os ARQUIVOS não podem ser mexidos (a linha importada referencia
+// o XML no SINCRONIZADO, e reinjetar a origem arriscaria duplicata). READ-ONLY.
+func (r *Reader) HasImportedRow(ctx context.Context, chave, markerPrefix string) (bool, error) {
+	if len(chave) != 44 || markerPrefix == "" {
+		return false, fmt.Errorf("HasImportedRow: chave/markerPrefix inválidos")
+	}
+	var has bool
+	err := r.retry(ctx, "pre-check de importada", func(ctx context.Context) error {
+		var one int
+		e := r.db.QueryRowContext(ctx, `
+			SELECT FIRST 1 1 FROM TABLISTACHAVEACESSO
+			WHERE CHAVEACESSO = ? AND IMPORTADO = 1 AND OBSERVACOES STARTING WITH ?`,
+			chave, toLatin1(markerPrefix)).Scan(&one)
+		if e == sql.ErrNoRows {
+			has = false
+			return nil
+		}
+		has = e == nil
+		return e
+	})
+	return has, err
+}
+
+// ListOurRows devolve as nossas linhas (para o manifesto e para enumerar chaves
+// do rollback em massa). onlyPending=true restringe a IMPORTADO=0; since != zero
+// restringe a DATAINCLUSAO >= since (índice — ver CountOurRows). READ-ONLY.
+func (r *Reader) ListOurRows(ctx context.Context, markerPrefix string, onlyPending bool, since time.Time) ([]OurRow, error) {
+	if markerPrefix == "" {
+		return nil, fmt.Errorf("ListOurRows: markerPrefix vazio listaria linhas de terceiros")
+	}
+	q := `SELECT CHAVEACESSO, CODIGOEMPRESA, CODIGOFILIAL, IMPORTADO, DATAINCLUSAO, URL
+	      FROM TABLISTACHAVEACESSO
+	      WHERE OBSERVACOES STARTING WITH ?`
+	args := []any{toLatin1(markerPrefix)}
+	if onlyPending {
+		q += ` AND IMPORTADO = 0`
+	}
+	if !since.IsZero() {
+		q += ` AND DATAINCLUSAO >= ?`
+		args = append(args, dateOnlyUTC(since))
+	}
+	q += ` ORDER BY DATAINCLUSAO, CHAVEACESSO`
+	var out []OurRow
+	err := r.retry(ctx, "lista das nossas linhas", func(ctx context.Context) error {
+		out = nil // idempotente sob retry: nunca acumula de uma tentativa anterior
+		rows, e := r.db.QueryContext(ctx, q, args...)
+		if e != nil {
+			return e
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var chave, url sql.NullString
+			var emp, fil, imp sql.NullInt64
+			var di sql.NullTime
+			if e := rows.Scan(&chave, &emp, &fil, &imp, &di, &url); e != nil {
+				return e
+			}
+			out = append(out, OurRow{
+				Chave: trimNull(chave), CodigoEmpresa: int(emp.Int64), CodigoFilial: int(fil.Int64),
+				Importado: int(imp.Int64), DataInclusao: di.Time, URL: toUTF8(trimNull(url)),
+			})
+		}
+		return rows.Err()
+	})
+	return out, err
+}
+
 // EmpresaNomes carrega o nome de cada empresa (TABEMPRESAS) — o 1º segmento do
 // caminho derivado. Poucos milhares de linhas; carregado uma vez por ciclo.
 // READ-ONLY (com retry de conexão). Nomes transcodificados para UTF-8 (o
