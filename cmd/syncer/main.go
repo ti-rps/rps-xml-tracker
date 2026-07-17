@@ -13,6 +13,7 @@
 //	--dry-run             só planeja e loga/grava o plano; NENHUMA escrita (modo da F1)
 //	--chave <44> --file <path>   sincroniza SÓ essa chave (gatilho do piloto F2)
 //	--once                uma varredura e sai (sem loop)
+//	--worklist [--filial-max N]  lê a lista de pendentes do tracker (agent) e sincroniza — SEM varrer o FS
 //	--audit [--since d] [--dump f]  READ-ONLY: conta as nossas linhas (marcador); --since escopa (índice); --dump grava manifesto JSONL
 //	--rollback <44> --yes DESTRUTIVO: desfaz o sync dessa chave (§10)
 //	--rollback-all --yes  DESTRUTIVO: rollback em lote de TODAS as nossas linhas IMPORTADO=0 (§14.1)
@@ -29,6 +30,7 @@
 //	TRACKER_AGENT_SECRET        segredo HMAC do ingest (o mesmo do agente)
 //	TRACKER_FB_DSN              Firebird READ-ONLY (resolução + pre-checks)
 //	TRACKER_FB_WRITE_DSN        Firebird de ESCRITA (obrigatório fora do dry-run)
+//	TRACKER_PG_DSN              Postgres do tracker (só p/ --worklist: lê a lista do agent)
 //	TRACKER_SYNCER_ARRIVAL_ROOT ex.: F:\Xml_ASincronizar
 //	TRACKER_SYNCER_SYNC_ROOT    ex.: F:\XML SINCRONIZADO
 //	TRACKER_SYNCER_EMPRESAS     allowlist CODIGOEMPRESA, csv (varredura)
@@ -53,6 +55,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -259,6 +262,9 @@ func main() {
 	rollbackChave := flag.String("rollback", "", "DESTRUTIVO: desfaz a sincronização desta chave (apaga NOSSAS linhas IMPORTADO=0, restaura o arquivo na ASINCRONIZAR); exige --yes")
 	rollbackAll := flag.Bool("rollback-all", false, "DESTRUTIVO: rollback EM LOTE de TODAS as nossas linhas IMPORTADO=0; exige --yes")
 	selftest := flag.Bool("selftest-rollback", false, "insere uma linha-isca sintética e a desfaz — testa INSERT+rollback na tabela real; exige --yes")
+	worklist := flag.Bool("worklist", false, "lê a lista de pendentes de sync do tracker via PG (dado do agent) e sincroniza, SEM varrer o filesystem (exige TRACKER_PG_DSN + TRACKER_SYNCER_EMPRESAS)")
+	worklistFile := flag.String("worklist-file", "", "lê a worklist de um arquivo JSONL ({chave,file_path} por linha) e sincroniza — fonte quando o PG não é alcançável do syncer")
+	filialMax := flag.Int("filial-max", 0, "com --worklist: limita a codigo_filial <= N (0 = todas)")
 	audit := flag.Bool("audit", false, "READ-ONLY: conta as nossas linhas (marcador), split IMPORTADO=0/1")
 	dump := flag.String("dump", "", "com --audit: grava manifesto JSONL de TODAS as nossas linhas nesse arquivo")
 	since := flag.String("since", "", "com --audit: escopa por DATAINCLUSAO >= YYYY-MM-DD (usa índice; vazio = full scan da tabela)")
@@ -395,6 +401,52 @@ func main() {
 		return
 	}
 
+	// Worklist a partir de ARQUIVO (JSONL gerado por query no tracker e copiado
+	// pra cá): usado quando o PG não é alcançável do syncer. dry-run ou real.
+	if *worklistFile != "" {
+		prg.build(dryRun, *allowStale)
+		defer prg.closeAll()
+		items, err := syncer.LoadWorklistFile(*worklistFile)
+		if err != nil {
+			log.Fatalf("worklist-file: %v", err)
+		}
+		log.Printf("worklist-file: %d item(ns) lido(s) de %s", len(items), *worklistFile)
+		res, err := prg.sn.RunWorklist(prg.ctx, items)
+		if err != nil {
+			log.Fatalf("worklist: %v", err)
+		}
+		log.Printf("worklist concluída: fetched=%d planejados=%d executados=%d chave_divergente=%d sem_path=%d erros=%d",
+			res.Fetched, res.Planned, res.Executed, res.Mismatch, res.NoPath, res.Errors)
+		return
+	}
+
+	// Worklist (agent = olhos, syncer = mãos): lê do tracker as pendentes de sync
+	// e sincroniza SEM varrer o filesystem. dry-run ou real. Roda uma vez e sai.
+	if *worklist {
+		empresas := sortedKeys(parseEmpresas(os.Getenv("TRACKER_SYNCER_EMPRESAS")))
+		if len(empresas) == 0 {
+			log.Fatal("--worklist exige TRACKER_SYNCER_EMPRESAS (allowlist) — não sincronizamos tudo sem cerca")
+		}
+		pgDSN := mustEnv("TRACKER_PG_DSN")
+		prg.build(dryRun, *allowStale)
+		defer prg.closeAll()
+		since := firstDayPrevMonth(time.Now())
+		limit := envInt("TRACKER_SYNCER_MAX_SCAN", 5000)
+		items, err := syncer.FetchWorklist(prg.ctx, pgDSN, empresas, *filialMax, since, limit)
+		if err != nil {
+			log.Fatalf("worklist fetch: %v", err)
+		}
+		log.Printf("worklist: %d nota(s) pendente(s) de sync no tracker (empresas=%v filial<=%d emissão>=%s)",
+			len(items), empresas, *filialMax, since.Format("2006-01-02"))
+		res, err := prg.sn.RunWorklist(prg.ctx, items)
+		if err != nil {
+			log.Fatalf("worklist: %v", err)
+		}
+		log.Printf("worklist concluída: fetched=%d planejados=%d executados=%d chave_divergente=%d sem_path=%d erros=%d",
+			res.Fetched, res.Planned, res.Executed, res.Mismatch, res.NoPath, res.Errors)
+		return
+	}
+
 	prg.build(dryRun, *allowStale)
 	if *once {
 		defer prg.closeAll()
@@ -505,6 +557,23 @@ func parseEmpresas(csv string) map[int]bool {
 		}
 	}
 	return out
+}
+
+// sortedKeys extrai as chaves de um set em ordem (allowlist -> slice p/ a query).
+func sortedKeys(m map[int]bool) []int {
+	out := make([]int, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// firstDayPrevMonth: 1º dia do mês ANTERIOR (janela do AthenasHorse = atual+anterior).
+// Piso do fetch da worklist p/ não trazer backlog stale (que o PlanFile pularia).
+func firstDayPrevMonth(t time.Time) time.Time {
+	y, m := t.Year(), t.Month()
+	return time.Date(y, m, 1, 0, 0, 0, 0, t.Location()).AddDate(0, -1, 0)
 }
 
 func parseCSV(s string) []string {

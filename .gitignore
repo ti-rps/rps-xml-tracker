@@ -12,3 +12,4 @@
 coverage.*
 # estado local do code-graph MCP (tokensave)
 .tokensave/
+/cmd/tmpq/
