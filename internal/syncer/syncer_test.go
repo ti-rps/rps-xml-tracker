@@ -449,6 +449,63 @@ func TestRollbackAll_DesfazTodasPendentes(t *testing.T) {
 	}
 }
 
+// RunWorklist (real): sincroniza os itens da lista sem varrer o filesystem —
+// move o arquivo e insere a linha, igual ao sweep, mas dirigido pela lista.
+func TestRunWorklist_Real(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, false)
+	o := writeXML(t, arrival, "n.xml", nfeXML(chaveTeste, cnpjA, cnpjB))
+	res, err := s.RunWorklist(context.Background(), []WorklistItem{{Chave: chaveTeste, FilePath: o}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Executed != 1 || res.Errors != 0 {
+		t.Errorf("executed=%d errors=%d; want 1,0", res.Executed, res.Errors)
+	}
+	if len(fb.rows) == 0 {
+		t.Error("esperava linha(s) inserida(s)")
+	}
+	if _, err := os.Stat(o); !os.IsNotExist(err) {
+		t.Error("origem deveria ter sido removida após o sync")
+	}
+}
+
+// RunWorklist (dry-run): planeja, não escreve.
+func TestRunWorklist_DryRun(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, true)
+	o := writeXML(t, arrival, "n.xml", nfeXML(chaveTeste, cnpjA, cnpjB))
+	res, err := s.RunWorklist(context.Background(), []WorklistItem{{Chave: chaveTeste, FilePath: o}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Planned != 1 || res.Executed != 0 {
+		t.Errorf("planned=%d executed=%d; want 1,0", res.Planned, res.Executed)
+	}
+	if len(fb.rows) != 0 {
+		t.Error("dry-run não deveria inserir")
+	}
+}
+
+// RunWorklist protege contra file_path stale: se o arquivo tem chave diferente da
+// esperada (movido/substituído), o item é pulado, não sincronizado errado.
+func TestRunWorklist_ChaveDivergente(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, false)
+	o := writeXML(t, arrival, "n.xml", nfeXML(chaveTeste, cnpjA, cnpjB))
+	outra := "35" + strings.Repeat("9", 42) // 44 díg., mas não é a chave do arquivo
+	res, err := s.RunWorklist(context.Background(), []WorklistItem{{Chave: outra, FilePath: o}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mismatch != 1 || res.Executed != 0 {
+		t.Errorf("mismatch=%d executed=%d; want 1,0", res.Mismatch, res.Executed)
+	}
+	if _, err := os.Stat(o); err != nil {
+		t.Error("origem NÃO deveria ter sido tocada num mismatch")
+	}
+}
+
 // Guarda de importada: numa nota multi-participação com UMA participação já
 // importada (IMPORTADO=1), o rollback apaga só a pendente e NÃO toca em arquivo
 // (o XML importado segue referenciado pelo livro). Achado do code-review.
