@@ -185,6 +185,13 @@ func (m *Memory) ListChavesImportedSince(_ context.Context, since time.Time) ([]
 	return out, nil
 }
 
+// Worklist: o store em memória não modela arrived/synced/cnpj para a worklist
+// (o filtro real é SQL). Devolve vazio — a API é testada com a store real ou com
+// asserções sobre o request; este stub só satisfaz a interface.
+func (m *Memory) Worklist(_ context.Context, _ model.WorklistQuery) ([]model.WorklistItem, error) {
+	return []model.WorklistItem{}, nil
+}
+
 func (m *Memory) StatusForChaves(_ context.Context, chaves []string) (map[string]model.NotaStatus, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

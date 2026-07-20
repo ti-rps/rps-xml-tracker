@@ -85,6 +85,9 @@ func (s *Server) routes() {
 	ingest := v1.Group("/ingest", agentHMAC(s.cfg.AgentSecret))
 	ingest.POST("/observations", s.handleIngest)
 	ingest.POST("/agent/heartbeat", s.handleAgentHeartbeat)
+	// worklist: o syncer (mesmo HMAC do agente) pede a lista de pendentes de sync.
+	// POST (não GET) porque o HMAC assina o body — e o body carrega os filtros.
+	ingest.POST("/worklist", s.handleWorklist)
 
 	// reads — maestro JWT
 	read := v1.Group("", jwtAuth(s.cfg.JWTSecret))
@@ -300,6 +303,43 @@ func (s *Server) handleIngest(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"accepted": accepted, "rejected": rejected})
+}
+
+// worklistRequest são os filtros que o syncer envia. roots são os CNPJ-base (o
+// syncer os computa a partir da sua allowlist via Firebird; a API é só-Postgres).
+type worklistRequest struct {
+	Roots     []string `json:"roots"`
+	FilialMax int      `json:"filial_max"`
+	Since     string   `json:"since"` // YYYY-MM-DD (piso de emissão)
+	Limit     int      `json:"limit"`
+}
+
+func (s *Server) handleWorklist(c *gin.Context) {
+	var req worklistRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "json inválido: " + err.Error()})
+		return
+	}
+	if len(req.Roots) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "roots (CNPJ-base) é obrigatório — a API não varre tudo"})
+		return
+	}
+	since, err := time.Parse("2006-01-02", req.Since)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "since inválido (use YYYY-MM-DD)"})
+		return
+	}
+	items, err := s.st.Worklist(c.Request.Context(), model.WorklistQuery{
+		Roots: req.Roots, FilialMax: req.FilialMax, Since: since, Limit: req.Limit,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "falha ao montar worklist"})
+		return
+	}
+	if items == nil {
+		items = []model.WorklistItem{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
 }
 
 func (s *Server) handleGetNota(c *gin.Context) {

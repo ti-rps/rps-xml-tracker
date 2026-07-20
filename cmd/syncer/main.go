@@ -13,7 +13,8 @@
 //	--dry-run             só planeja e loga/grava o plano; NENHUMA escrita (modo da F1)
 //	--chave <44> --file <path>   sincroniza SÓ essa chave (gatilho do piloto F2)
 //	--once                uma varredura e sai (sem loop)
-//	--worklist [--filial-max N]  lê a lista de pendentes do tracker (agent) e sincroniza — SEM varrer o FS
+//	--worklist [--filial-max N]  lê a lista de pendentes do tracker (agent) via PG e sincroniza — SEM varrer o FS
+//	--worklist-api [--filial-max N]  idem, mas busca a lista pela API (POST HMAC) — caminho de produção (5432 não exposta)
 //	--audit [--since d] [--dump f]  READ-ONLY: conta as nossas linhas (marcador); --since escopa (índice); --dump grava manifesto JSONL
 //	--rollback <44> --yes DESTRUTIVO: desfaz o sync dessa chave (§10)
 //	--rollback-all --yes  DESTRUTIVO: rollback em lote de TODAS as nossas linhas IMPORTADO=0 (§14.1)
@@ -263,6 +264,7 @@ func main() {
 	rollbackAll := flag.Bool("rollback-all", false, "DESTRUTIVO: rollback EM LOTE de TODAS as nossas linhas IMPORTADO=0; exige --yes")
 	selftest := flag.Bool("selftest-rollback", false, "insere uma linha-isca sintética e a desfaz — testa INSERT+rollback na tabela real; exige --yes")
 	worklist := flag.Bool("worklist", false, "lê a lista de pendentes de sync do tracker via PG (dado do agent) e sincroniza, SEM varrer o filesystem (exige TRACKER_PG_DSN + TRACKER_SYNCER_EMPRESAS)")
+	worklistAPI := flag.Bool("worklist-api", false, "como --worklist, mas busca a lista pela API do tracker (POST HMAC) — caminho de PRODUÇÃO (a 5432 não é exposta do SRVIMPORT); exige TRACKER_API_URL + TRACKER_AGENT_SECRET + TRACKER_SYNCER_EMPRESAS")
 	worklistFile := flag.String("worklist-file", "", "lê a worklist de um arquivo JSONL ({chave,file_path} por linha) e sincroniza — fonte quando o PG não é alcançável do syncer")
 	filialMax := flag.Int("filial-max", 0, "com --worklist: limita a codigo_filial <= N (0 = todas)")
 	audit := flag.Bool("audit", false, "READ-ONLY: conta as nossas linhas (marcador), split IMPORTADO=0/1")
@@ -450,6 +452,39 @@ func main() {
 		res, err := prg.sn.RunWorklist(prg.ctx, items)
 		if err != nil {
 			log.Fatalf("worklist: %v", err)
+		}
+		log.Printf("worklist concluída: fetched=%d planejados=%d executados=%d chave_divergente=%d sem_path=%d erros=%d",
+			res.Fetched, res.Planned, res.Executed, res.Mismatch, res.NoPath, res.Errors)
+		return
+	}
+
+	// Worklist via API (produção): mesmo fluxo do --worklist, mas busca a lista
+	// pela API do tracker (POST HMAC) porque a 5432 não é exposta do SRVIMPORT.
+	if *worklistAPI {
+		empresas := sortedKeys(parseEmpresas(os.Getenv("TRACKER_SYNCER_EMPRESAS")))
+		if len(empresas) == 0 {
+			log.Fatal("--worklist-api exige TRACKER_SYNCER_EMPRESAS (allowlist) — não sincronizamos tudo sem cerca")
+		}
+		prg.build(dryRun, *allowStale)
+		defer prg.closeAll()
+		roots, err := prg.sn.RootsForEmpresas(prg.ctx, empresas)
+		if err != nil {
+			log.Fatalf("worklist-api: mapear empresas->CNPJ: %v", err)
+		}
+		if len(roots) == 0 {
+			log.Fatalf("worklist-api: nenhuma filial com CNPJ encontrada p/ as empresas %v", empresas)
+		}
+		since := firstDayPrevMonth(time.Now())
+		limit := envInt("TRACKER_SYNCER_MAX_SCAN", 5000)
+		items, err := syncer.FetchWorklistAPI(prg.ctx, prg.apiURL, prg.secret, roots, *filialMax, since, limit)
+		if err != nil {
+			log.Fatalf("worklist-api fetch: %v", err)
+		}
+		log.Printf("worklist-api: %d nota(s) pendente(s) de sync (empresas=%v cnpj-base=%v filial<=%d emissão>=%s)",
+			len(items), empresas, roots, *filialMax, since.Format("2006-01-02"))
+		res, err := prg.sn.RunWorklist(prg.ctx, items)
+		if err != nil {
+			log.Fatalf("worklist-api: %v", err)
 		}
 		log.Printf("worklist concluída: fetched=%d planejados=%d executados=%d chave_divergente=%d sem_path=%d erros=%d",
 			res.Fetched, res.Planned, res.Executed, res.Mismatch, res.NoPath, res.Errors)

@@ -65,6 +65,12 @@ type Store interface {
 	// DESTRUTIVO: usado só na correção retroativa do fuso do imported_at.
 	UpdateImportedObservedAt(ctx context.Context, chave string, observedAt time.Time) (bool, error)
 
+	// Worklist retorna as notas arrived∧¬synced cujo emitente OU destinatário casa
+	// com um dos CNPJ-base (q.Roots). READ-ONLY; alimenta o modo worklist do syncer
+	// (agent=olhos, syncer=mãos). Dono ÚNICO da SQL — a API e o --worklist PG-direto
+	// do syncer passam por aqui.
+	Worklist(ctx context.Context, q model.WorklistQuery) ([]model.WorklistItem, error)
+
 	// Overview returns the dashboard summary cards. Com OverviewFilter vazio = estoque
 	// atual global (snapshot). Com janela de data e/ou filtros = recompute ao vivo das
 	// contagens por status (mode="flow"); imported_today e latências seguem globais/30d.

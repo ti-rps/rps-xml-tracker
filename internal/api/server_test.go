@@ -129,6 +129,60 @@ func TestIngest_BadHMAC_401(t *testing.T) {
 	}
 }
 
+// worklist: autenticado por HMAC (não JWT), valida roots+since, e devolve a forma
+// {items,total}. O store em memória devolve lista vazia — aqui exercitamos auth,
+// validação e o contrato de resposta, não a query (essa é testada com PG real).
+func TestWorklist_HMAC_and_validation(t *testing.T) {
+	h := newTestServer()
+	post := func(sig string, payload map[string]any) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/ingest/worklist", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if sig != "" {
+			req.Header.Set("X-Agent-Signature", sig)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	valid := map[string]any{"roots": []string{"11222333"}, "since": "2026-06-01", "limit": 10}
+
+	// HMAC válido -> 200 + {items,total}
+	vb, _ := json.Marshal(valid)
+	w := post(signing.Sign(testAgent, vb), valid)
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (body=%s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items []model.WorklistItem `json:"items"`
+		Total int                  `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("resposta não casa o contrato {items,total}: %v", err)
+	}
+
+	// assinatura inválida -> 401 (mesma guarda do ingest)
+	if got := post("deadbeef", valid).Code; got != http.StatusUnauthorized {
+		t.Errorf("bad HMAC code = %d, want 401", got)
+	}
+	// sem assinatura -> 401
+	if got := post("", valid).Code; got != http.StatusUnauthorized {
+		t.Errorf("no HMAC code = %d, want 401", got)
+	}
+	// roots vazio -> 400 (a API não varre tudo). Assina o body vazio-de-roots.
+	empty := map[string]any{"roots": []string{}, "since": "2026-06-01"}
+	eb, _ := json.Marshal(empty)
+	if got := post(signing.Sign(testAgent, eb), empty).Code; got != http.StatusBadRequest {
+		t.Errorf("empty roots code = %d, want 400", got)
+	}
+	// since inválido -> 400
+	bad := map[string]any{"roots": []string{"11222333"}, "since": "ontem"}
+	bb, _ := json.Marshal(bad)
+	if got := post(signing.Sign(testAgent, bb), bad).Code; got != http.StatusBadRequest {
+		t.Errorf("bad since code = %d, want 400", got)
+	}
+}
+
 func TestGetNota_NoJWT_401(t *testing.T) {
 	h := newTestServer()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/notas/K1", nil)
