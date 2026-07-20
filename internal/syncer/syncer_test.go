@@ -506,6 +506,52 @@ func TestRunWorklist_ChaveDivergente(t *testing.T) {
 	}
 }
 
+// RunWorklist trata file_path stale (arquivo já movido pelo DownloadXML) como
+// classe própria "arquivo_sumiu" — NÃO como "parse falhou" — e não executa.
+func TestRunWorklist_ArquivoSumiu(t *testing.T) {
+	fb := newFake()
+	s, arrival, _ := newSyncer(t, fb, false)
+	sumido := filepath.Join(arrival, "nao_existe.xml") // nunca criado
+	res, err := s.RunWorklist(context.Background(), []WorklistItem{{Chave: chaveTeste, FilePath: sumido}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Executed != 0 || res.Errors != 0 {
+		t.Errorf("executed=%d errors=%d; want 0,0", res.Executed, res.Errors)
+	}
+	if res.Skips["arquivo_sumiu"] != 1 {
+		t.Errorf("arquivo_sumiu=%d; want 1 (skips=%v)", res.Skips["arquivo_sumiu"], res.Skips)
+	}
+	if res.Skips["parse falhou"] != 0 {
+		t.Errorf("não deveria contar como parse falhou (skips=%v)", res.Skips)
+	}
+}
+
+// RootsForEmpresas converte a allowlist de codigo_empresa nos CNPJ-base das
+// filiais (via Firebird), ordenado e sem duplicatas — o insumo do filtro por CNPJ.
+func TestRootsForEmpresas(t *testing.T) {
+	fb := newFake() // filiais: 100->cnpjA(11222333...), 200->cnpjB(99888777...)
+	s, _, _ := newSyncer(t, fb, false)
+	got, err := s.RootsForEmpresas(context.Background(), []int{100, 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"11222333", "99888777"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("roots=%v; want %v", got, want)
+	}
+	// só a empresa 100 -> só o root dela
+	got1, _ := s.RootsForEmpresas(context.Background(), []int{100})
+	if len(got1) != 1 || got1[0] != "11222333" {
+		t.Errorf("roots(100)=%v; want [11222333]", got1)
+	}
+	// empresa inexistente -> vazio (a CLI trata como erro antes do fetch)
+	gotNone, _ := s.RootsForEmpresas(context.Background(), []int{999})
+	if len(gotNone) != 0 {
+		t.Errorf("roots(999)=%v; want []", gotNone)
+	}
+}
+
 // Guarda de importada: numa nota multi-participação com UMA participação já
 // importada (IMPORTADO=1), o rollback apaga só a pendente e NÃO toca em arquivo
 // (o XML importado segue referenciado pelo livro). Achado do code-review.
