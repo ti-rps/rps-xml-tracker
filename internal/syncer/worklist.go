@@ -27,9 +27,7 @@ type WorklistItem = model.WorklistItem
 // codigo_empresa. É o caminho PG-direto, usado quando a 5432 é alcançável (dev);
 // em produção o syncer no SRVIMPORT usa FetchWorklistAPI (a 5432 não é exposta).
 func FetchWorklist(ctx context.Context, pgDSN string, roots []string, filialMax int, since time.Time, limit int) ([]WorklistItem, error) {
-	if len(roots) == 0 {
-		return nil, fmt.Errorf("worklist exige allowlist de empresas com CNPJ conhecido (não varremos tudo)")
-	}
+	// roots vazio = todas as empresas (paridade com o sweep); store.Worklist trata.
 	pg, err := store.NewPostgres(ctx, pgDSN)
 	if err != nil {
 		return nil, fmt.Errorf("conectar no tracker (pg): %w", err)
@@ -42,8 +40,10 @@ func FetchWorklist(ctx context.Context, pgDSN string, roots []string, filialMax 
 // produção: o syncer no SRVIMPORT não alcança o Postgres (só a 8090). Assina o
 // body cru com o MESMO segredo do agente (agentHMAC), igual ao heartbeat.
 func FetchWorklistAPI(ctx context.Context, apiURL, secret string, roots []string, filialMax int, since time.Time, limit int) ([]WorklistItem, error) {
-	if len(roots) == 0 {
-		return nil, fmt.Errorf("worklist exige allowlist de empresas com CNPJ conhecido (não varremos tudo)")
+	// roots vazio = todas as empresas (paridade com o sweep). Garante array (não
+	// null) no JSON p/ o contrato ser estável.
+	if roots == nil {
+		roots = []string{}
 	}
 	body, err := json.Marshal(map[string]any{
 		"roots":      roots,
@@ -213,7 +213,7 @@ func (s *Syncer) RunWorklist(ctx context.Context, items []WorklistItem) (Worklis
 	for _, n := range res.Skips {
 		skipped += n
 	}
-	s.cfg.Log("WORKLIST fetched=%d planejados=%d executados=%d pulados=%d sem_path=%d chave_divergente=%d erros=%d",
-		res.Fetched, res.Planned, res.Executed, skipped, res.NoPath, res.Mismatch, res.Errors)
+	s.cfg.Log("WORKLIST fetched=%d planejados=%d executados=%d pulados=%d sem_path=%d chave_divergente=%d erros=%d skips=%v",
+		res.Fetched, res.Planned, res.Executed, skipped, res.NoPath, res.Mismatch, res.Errors, res.Skips)
 	return res, nil
 }
