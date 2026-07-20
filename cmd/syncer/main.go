@@ -430,14 +430,23 @@ func main() {
 		pgDSN := mustEnv("TRACKER_PG_DSN")
 		prg.build(dryRun, *allowStale)
 		defer prg.closeAll()
+		// A allowlist vem em codigo_empresa, mas o filtro correto é por CNPJ
+		// (notas.codigo_empresa é poluída pelo fan-out do SIEG): converte aqui.
+		roots, err := prg.sn.RootsForEmpresas(prg.ctx, empresas)
+		if err != nil {
+			log.Fatalf("worklist: mapear empresas->CNPJ: %v", err)
+		}
+		if len(roots) == 0 {
+			log.Fatalf("worklist: nenhuma filial com CNPJ encontrada p/ as empresas %v", empresas)
+		}
 		since := firstDayPrevMonth(time.Now())
 		limit := envInt("TRACKER_SYNCER_MAX_SCAN", 5000)
-		items, err := syncer.FetchWorklist(prg.ctx, pgDSN, empresas, *filialMax, since, limit)
+		items, err := syncer.FetchWorklist(prg.ctx, pgDSN, roots, *filialMax, since, limit)
 		if err != nil {
 			log.Fatalf("worklist fetch: %v", err)
 		}
-		log.Printf("worklist: %d nota(s) pendente(s) de sync no tracker (empresas=%v filial<=%d emissão>=%s)",
-			len(items), empresas, *filialMax, since.Format("2006-01-02"))
+		log.Printf("worklist: %d nota(s) pendente(s) de sync no tracker (empresas=%v cnpj-base=%v filial<=%d emissão>=%s)",
+			len(items), empresas, roots, *filialMax, since.Format("2006-01-02"))
 		res, err := prg.sn.RunWorklist(prg.ctx, items)
 		if err != nil {
 			log.Fatalf("worklist: %v", err)
