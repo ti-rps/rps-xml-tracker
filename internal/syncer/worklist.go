@@ -2,97 +2,81 @@ package syncer
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/model"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/signing"
+	"github.com/EnzzoHosaki/rps-xml-tracker/internal/store"
 )
 
-// WorklistItem é UMA nota que o AGENT já viu chegar e que ainda NÃO foi
-// sincronizada (arrived_at ∧ ¬synced_at no tracker) — a "lista de separação" que
-// o syncer executa SEM varrer o filesystem (o agent já varreu, esse é o ponto).
-// file_path vem da observação de chegada gravada pelo agent.
-type WorklistItem struct {
-	Chave         string `json:"chave"`
-	FilePath      string `json:"file_path"`
-	CodigoEmpresa int    `json:"codigo_empresa"`
-	CodigoFilial  int    `json:"codigo_filial"`
-	DataEmissao   string `json:"data_emissao"`
-}
+// WorklistItem é UMA nota pendente de sync — o contrato vive em model (partilhado
+// com store e API). Alias p/ o pacote syncer continuar usando o nome curto.
+type WorklistItem = model.WorklistItem
 
-// FetchWorklist lê do Postgres do tracker as notas pendentes de sync (arrived,
-// não synced) cujo emitente OU destinatário casa com um dos CNPJ-base (roots, 8
-// primeiros dígitos) da allowlist — opcionalmente limitando a filial (filialMax>0)
-// e a emissão (since). O file_path vem da última observação de chegada
-// (stage=arrival). READ-ONLY. É o oposto do SweepOnce: nada de andar no
-// A_SINCRONIZAR; o agent já fez isso e gravou aqui, então não repetimos o scan.
-//
-// Filtra por CNPJ-base, NÃO por notas.codigo_empresa: esta coluna reflete a
-// empresa que o poller escolheu no fan-out do SIEG (pode ser conta-lixo), não a
-// dona real — filtrar por ela deixaria notas legítimas de fora. O CNPJ é
-// autoritativo. Normaliza dígitos no banco (o valor gravado pode vir formatado) e
-// compara os 8 primeiros (base), o que cobre todas as filiais de um mesmo CNPJ.
+// FetchWorklist lê do Postgres do tracker as notas pendentes de sync via
+// store.Worklist (dono único da SQL). Filtra por CNPJ-base (roots), não por
+// codigo_empresa. É o caminho PG-direto, usado quando a 5432 é alcançável (dev);
+// em produção o syncer no SRVIMPORT usa FetchWorklistAPI (a 5432 não é exposta).
 func FetchWorklist(ctx context.Context, pgDSN string, roots []string, filialMax int, since time.Time, limit int) ([]WorklistItem, error) {
 	if len(roots) == 0 {
 		return nil, fmt.Errorf("worklist exige allowlist de empresas com CNPJ conhecido (não varremos tudo)")
 	}
-	if limit <= 0 {
-		limit = 100000
-	}
-	pool, err := pgxpool.New(ctx, pgDSN)
+	pg, err := store.NewPostgres(ctx, pgDSN)
 	if err != nil {
 		return nil, fmt.Errorf("conectar no tracker (pg): %w", err)
 	}
-	defer pool.Close()
+	defer pg.Close()
+	return pg.Worklist(ctx, model.WorklistQuery{Roots: roots, FilialMax: filialMax, Since: since, Limit: limit})
+}
 
-	const q = `
-		SELECT n.chave_acesso, n.codigo_empresa, n.codigo_filial, n.data_emissao,
-		       (SELECT o.file_path FROM observations o
-		         WHERE o.chave_acesso = n.chave_acesso
-		           AND o.stage = 'arrival'::stage AND o.file_path IS NOT NULL
-		         ORDER BY o.observed_at DESC LIMIT 1) AS file_path
-		FROM notas n
-		WHERE n.arrived_at IS NOT NULL AND n.synced_at IS NULL
-		  AND ( left(regexp_replace(coalesce(n.cnpj_emitente,''),    '[^0-9]', '', 'g'), 8) = ANY($1)
-		     OR left(regexp_replace(coalesce(n.cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = ANY($1) )
-		  AND ($2 = 0 OR n.codigo_filial <= $2)
-		  AND n.data_emissao >= $3
-		ORDER BY n.data_emissao, n.chave_acesso
-		LIMIT $4`
-	rows, err := pool.Query(ctx, q, roots, filialMax, since, limit)
+// FetchWorklistAPI busca a worklist pela API do tracker (POST HMAC), o caminho de
+// produção: o syncer no SRVIMPORT não alcança o Postgres (só a 8090). Assina o
+// body cru com o MESMO segredo do agente (agentHMAC), igual ao heartbeat.
+func FetchWorklistAPI(ctx context.Context, apiURL, secret string, roots []string, filialMax int, since time.Time, limit int) ([]WorklistItem, error) {
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("worklist exige allowlist de empresas com CNPJ conhecido (não varremos tudo)")
+	}
+	body, err := json.Marshal(map[string]any{
+		"roots":      roots,
+		"filial_max": filialMax,
+		"since":      since.Format("2006-01-02"),
+		"limit":      limit,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("query worklist: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-	var out []WorklistItem
-	for rows.Next() {
-		var it WorklistItem
-		var emp, fil *int
-		var de *time.Time
-		var fp *string
-		if err := rows.Scan(&it.Chave, &emp, &fil, &de, &fp); err != nil {
-			return nil, err
-		}
-		if emp != nil {
-			it.CodigoEmpresa = *emp
-		}
-		if fil != nil {
-			it.CodigoFilial = *fil
-		}
-		if de != nil {
-			it.DataEmissao = de.Format("2006-01-02")
-		}
-		if fp != nil {
-			it.FilePath = *fp
-		}
-		out = append(out, it)
+	url := strings.TrimRight(apiURL, "/") + "/api/v1/ingest/worklist"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-Signature", signing.Sign(secret, body))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("chamar worklist API: %w", err)
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20)) // até 64 MiB de itens
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("worklist API status %d: %s", resp.StatusCode, strings.TrimSpace(string(rb)))
+	}
+	var out struct {
+		Items []WorklistItem `json:"items"`
+	}
+	if err := json.Unmarshal(rb, &out); err != nil {
+		return nil, fmt.Errorf("decodificar worklist API: %w", err)
+	}
+	return out.Items, nil
 }
 
 // RootsForEmpresas mapeia a allowlist de codigo_empresa para os CNPJ-base (8

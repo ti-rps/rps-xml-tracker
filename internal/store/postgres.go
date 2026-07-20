@@ -990,6 +990,68 @@ func (p *Postgres) KnownImported(ctx context.Context, chaves []string) (map[stri
 // empresa) cujo imported_at cai na janela [since, until), opcionalmente de uma
 // empresa. É o lado "tracker" do reconcile por TABLISTACHAVEACESSO (mesma janela
 // de DATAINCLUSAO no Athenas).
+// Worklist retorna as notas arrived∧¬synced cujo emitente OU destinatário casa
+// com um dos CNPJ-base (q.Roots, 8 primeiros dígitos). Filtra por CNPJ, NÃO por
+// codigo_empresa (poluída pelo fan-out do SIEG). Normaliza dígitos no banco
+// (o valor gravado pode vir formatado). O file_path vem da última observação de
+// chegada (stage=arrival). READ-ONLY.
+//
+// A expressão funcional left(regexp_replace(...),8) NÃO usa os índices atuais
+// (que são na coluna crua); o predicado seletivo é arrived∧¬synced. Índice
+// funcional é follow-up (CONCURRENTLY) ao ligar o worklist em produção.
+func (p *Postgres) Worklist(ctx context.Context, q model.WorklistQuery) ([]model.WorklistItem, error) {
+	if len(q.Roots) == 0 {
+		return nil, fmt.Errorf("worklist exige roots (CNPJ-base) — não varremos tudo")
+	}
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 100000
+	}
+	const sql = `
+		SELECT n.chave_acesso, n.codigo_empresa, n.codigo_filial, n.data_emissao,
+		       (SELECT o.file_path FROM observations o
+		         WHERE o.chave_acesso = n.chave_acesso
+		           AND o.stage = 'arrival'::stage AND o.file_path IS NOT NULL
+		         ORDER BY o.observed_at DESC LIMIT 1) AS file_path
+		FROM notas n
+		WHERE n.arrived_at IS NOT NULL AND n.synced_at IS NULL
+		  AND ( left(regexp_replace(coalesce(n.cnpj_emitente,''),    '[^0-9]', '', 'g'), 8) = ANY($1)
+		     OR left(regexp_replace(coalesce(n.cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = ANY($1) )
+		  AND ($2 = 0 OR n.codigo_filial <= $2)
+		  AND n.data_emissao >= $3
+		ORDER BY n.data_emissao, n.chave_acesso
+		LIMIT $4`
+	rows, err := p.pool.Query(ctx, sql, q.Roots, q.FilialMax, q.Since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query worklist: %w", err)
+	}
+	defer rows.Close()
+	var out []model.WorklistItem
+	for rows.Next() {
+		var it model.WorklistItem
+		var emp, fil *int
+		var de *time.Time
+		var fp *string
+		if err := rows.Scan(&it.Chave, &emp, &fil, &de, &fp); err != nil {
+			return nil, err
+		}
+		if emp != nil {
+			it.CodigoEmpresa = *emp
+		}
+		if fil != nil {
+			it.CodigoFilial = *fil
+		}
+		if de != nil {
+			it.DataEmissao = de.Format("2006-01-02")
+		}
+		if fp != nil {
+			it.FilePath = *fp
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
 func (p *Postgres) ImportedChavesBetween(ctx context.Context, since, until time.Time, codigoEmpresa, codigoFilial *int) ([]string, error) {
 	q := `SELECT chave_acesso FROM notas WHERE imported_at >= $1 AND imported_at < $2`
 	args := []any{since, until}
