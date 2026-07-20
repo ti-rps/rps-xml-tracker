@@ -149,21 +149,22 @@ func (p *program) worklistCycle() {
 	pay := map[string]any{"modo": modo(p.dryRun), "fonte": "worklist-api"}
 	defer func() { postHeartbeat(p.ctx, p.apiURL, p.secret, p.name, pay) }()
 
-	if len(p.empresas) == 0 {
-		log.Print("worklist: TRACKER_SYNCER_EMPRESAS vazio — allowlist obrigatória, ciclo pulado")
-		pay["error"] = "allowlist vazia"
-		return
-	}
-	roots, err := p.sn.RootsForEmpresas(p.ctx, p.empresas)
-	if err != nil {
-		log.Printf("worklist: mapear empresas->CNPJ: %v", err)
-		pay["error"] = err.Error()
-		return
-	}
-	if len(roots) == 0 {
-		log.Printf("worklist: nenhuma filial com CNPJ p/ as empresas %v — ciclo pulado", p.empresas)
-		pay["error"] = "sem CNPJ para a allowlist"
-		return
+	// empresas vazio = TODAS (paridade com o sweep); com allowlist, mapeia p/
+	// CNPJ-base. empresas dadas mas sem CNPJ resolvido = misconfig → pula o ciclo.
+	var roots []string
+	if len(p.empresas) > 0 {
+		r, err := p.sn.RootsForEmpresas(p.ctx, p.empresas)
+		if err != nil {
+			log.Printf("worklist: mapear empresas->CNPJ: %v", err)
+			pay["error"] = err.Error()
+			return
+		}
+		if len(r) == 0 {
+			log.Printf("worklist: nenhuma filial com CNPJ p/ as empresas %v — ciclo pulado", p.empresas)
+			pay["error"] = "sem CNPJ para a allowlist"
+			return
+		}
+		roots = r
 	}
 	since := firstDayPrevMonth(time.Now())
 	limit := envInt("TRACKER_SYNCER_MAX_SCAN", 5000)
@@ -531,10 +532,7 @@ func main() {
 		if *filialMax > 0 {
 			prg.filialMax = *filialMax
 		}
-		if len(prg.empresas) == 0 {
-			log.Fatal("--worklist-api exige TRACKER_SYNCER_EMPRESAS (allowlist) — não sincronizamos tudo sem cerca")
-		}
-		prg.worklistCycle()
+		prg.worklistCycle() // empresas vazio = todas
 		return
 	}
 

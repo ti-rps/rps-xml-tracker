@@ -320,10 +320,9 @@ func (s *Server) handleWorklist(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "json inválido: " + err.Error()})
 		return
 	}
-	if len(req.Roots) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "roots (CNPJ-base) é obrigatório — a API não varre tudo"})
-		return
-	}
+	// roots vazio = TODAS as empresas (o syncer sem allowlist, paridade com o
+	// sweep). Com roots, filtra por CNPJ-base. A cerca real é o HMAC + o gate do
+	// PlanFile no syncer.
 	since, err := time.Parse("2006-01-02", req.Since)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "since inválido (use YYYY-MM-DD)"})

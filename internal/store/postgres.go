@@ -1000,28 +1000,38 @@ func (p *Postgres) KnownImported(ctx context.Context, chaves []string) (map[stri
 // (que são na coluna crua); o predicado seletivo é arrived∧¬synced. Índice
 // funcional é follow-up (CONCURRENTLY) ao ligar o worklist em produção.
 func (p *Postgres) Worklist(ctx context.Context, q model.WorklistQuery) ([]model.WorklistItem, error) {
-	if len(q.Roots) == 0 {
-		return nil, fmt.Errorf("worklist exige roots (CNPJ-base) — não varremos tudo")
-	}
 	limit := q.Limit
 	if limit <= 0 {
 		limit = 100000
 	}
-	const sql = `
+	// Roots vazio = TODAS as empresas (paridade com o sweep sem allowlist): sem o
+	// filtro CNPJ, a worklist é toda arrived∧¬synced. Com roots, filtra por
+	// CNPJ-base (não por codigo_empresa, poluída pelo fan-out do SIEG).
+	where := []string{"n.arrived_at IS NOT NULL", "n.synced_at IS NULL"}
+	args := []any{}
+	if len(q.Roots) > 0 {
+		args = append(args, q.Roots)
+		where = append(where, fmt.Sprintf(
+			"( left(regexp_replace(coalesce(n.cnpj_emitente,''),'[^0-9]','','g'),8) = ANY($%d)"+
+				" OR left(regexp_replace(coalesce(n.cnpj_destinatario,''),'[^0-9]','','g'),8) = ANY($%d) )",
+			len(args), len(args)))
+	}
+	args = append(args, q.FilialMax)
+	where = append(where, fmt.Sprintf("($%d = 0 OR n.codigo_filial <= $%d)", len(args), len(args)))
+	args = append(args, q.Since)
+	where = append(where, fmt.Sprintf("n.data_emissao >= $%d", len(args)))
+	args = append(args, limit)
+	sql := `
 		SELECT n.chave_acesso, n.codigo_empresa, n.codigo_filial, n.data_emissao,
 		       (SELECT o.file_path FROM observations o
 		         WHERE o.chave_acesso = n.chave_acesso
 		           AND o.stage = 'arrival'::stage AND o.file_path IS NOT NULL
 		         ORDER BY o.observed_at DESC LIMIT 1) AS file_path
 		FROM notas n
-		WHERE n.arrived_at IS NOT NULL AND n.synced_at IS NULL
-		  AND ( left(regexp_replace(coalesce(n.cnpj_emitente,''),    '[^0-9]', '', 'g'), 8) = ANY($1)
-		     OR left(regexp_replace(coalesce(n.cnpj_destinatario,''), '[^0-9]', '', 'g'), 8) = ANY($1) )
-		  AND ($2 = 0 OR n.codigo_filial <= $2)
-		  AND n.data_emissao >= $3
+		WHERE ` + strings.Join(where, " AND ") + `
 		ORDER BY n.data_emissao, n.chave_acesso
-		LIMIT $4`
-	rows, err := p.pool.Query(ctx, sql, q.Roots, q.FilialMax, q.Since, limit)
+		LIMIT $` + fmt.Sprintf("%d", len(args))
+	rows, err := p.pool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query worklist: %w", err)
 	}

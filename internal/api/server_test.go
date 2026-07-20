@@ -169,11 +169,11 @@ func TestWorklist_HMAC_and_validation(t *testing.T) {
 	if got := post("", valid).Code; got != http.StatusUnauthorized {
 		t.Errorf("no HMAC code = %d, want 401", got)
 	}
-	// roots vazio -> 400 (a API não varre tudo). Assina o body vazio-de-roots.
+	// roots vazio -> 200 (= TODAS as empresas, paridade com o sweep). Assina o body.
 	empty := map[string]any{"roots": []string{}, "since": "2026-06-01"}
 	eb, _ := json.Marshal(empty)
-	if got := post(signing.Sign(testAgent, eb), empty).Code; got != http.StatusBadRequest {
-		t.Errorf("empty roots code = %d, want 400", got)
+	if got := post(signing.Sign(testAgent, eb), empty).Code; got != http.StatusOK {
+		t.Errorf("empty roots code = %d, want 200 (todas)", got)
 	}
 	// since inválido -> 400
 	bad := map[string]any{"roots": []string{"11222333"}, "since": "ontem"}
