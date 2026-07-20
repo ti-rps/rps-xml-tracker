@@ -213,7 +213,7 @@ func (s *Syncer) RunWorklist(ctx context.Context, items []WorklistItem) (Worklis
 	for _, n := range res.Skips {
 		skipped += n
 	}
-	s.cfg.Log("WORKLIST fetched=%d planejados=%d executados=%d pulados=%d sem_path=%d chave_divergente=%d erros=%d",
-		res.Fetched, res.Planned, res.Executed, skipped, res.NoPath, res.Mismatch, res.Errors)
+	s.cfg.Log("WORKLIST fetched=%d planejados=%d executados=%d pulados=%d sem_path=%d chave_divergente=%d erros=%d skips=%v",
+		res.Fetched, res.Planned, res.Executed, skipped, res.NoPath, res.Mismatch, res.Errors, res.Skips)
 	return res, nil
 }
