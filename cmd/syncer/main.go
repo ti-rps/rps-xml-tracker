@@ -34,7 +34,9 @@
 //	TRACKER_PG_DSN              Postgres do tracker (só p/ --worklist: lê a lista do agent)
 //	TRACKER_SYNCER_ARRIVAL_ROOT ex.: F:\Xml_ASincronizar
 //	TRACKER_SYNCER_SYNC_ROOT    ex.: F:\XML SINCRONIZADO
-//	TRACKER_SYNCER_EMPRESAS     allowlist CODIGOEMPRESA, csv (varredura)
+//	TRACKER_SYNCER_MODE         "worklist" p/ o serviço rodar por lista (API) em vez de varrer; default varredura
+//	TRACKER_SYNCER_FILIAL_MAX   com MODE=worklist: limita codigo_filial<=N (0 = todas)
+//	TRACKER_SYNCER_EMPRESAS     allowlist CODIGOEMPRESA, csv (varredura e worklist)
 //	TRACKER_SYNCER_DIRS         allowlist de subpastas da ASINCRONIZAR, csv (varredura)
 //	TRACKER_SYNCER_MAX_PER_CYCLE  planos/execuções por ciclo (default 1)
 //	TRACKER_SYNCER_MAX_SCAN     arquivos examinados por ciclo (default 5000)
@@ -74,17 +76,20 @@ import (
 const svcName = "RpsXmlTrackerSyncer"
 
 type program struct {
-	sn       *syncer.Syncer
-	rd       *firebird.Reader
-	wr       *firebird.Writer
-	interval time.Duration
-	dryRun   bool
-	apiURL   string
-	secret   string
-	name     string
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	sn           *syncer.Syncer
+	rd           *firebird.Reader
+	wr           *firebird.Writer
+	interval     time.Duration
+	dryRun       bool
+	apiURL       string
+	secret       string
+	name         string
+	worklistMode bool  // TRACKER_SYNCER_MODE=worklist: cycle() busca a lista pela API em vez de varrer
+	empresas     []int // allowlist (codigo_empresa) p/ a worklist
+	filialMax    int   // limita codigo_filial<=N na worklist (0 = todas)
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
 }
 
 func (p *program) Start(service.Service) error {
@@ -107,6 +112,10 @@ func (p *program) Start(service.Service) error {
 }
 
 func (p *program) cycle() {
+	if p.worklistMode {
+		p.worklistCycle()
+		return
+	}
 	res, err := p.sn.SweepOnce(p.ctx)
 	pay := map[string]any{
 		"modo":       modo(p.dryRun),
@@ -130,6 +139,54 @@ func (p *program) cycle() {
 			res.Scanned, res.Planned, res.Executed, res.Errors, res.CursorStart, res.CursorEnd, res.Wrapped, res.Skips)
 	}
 	postHeartbeat(p.ctx, p.apiURL, p.secret, p.name, pay)
+}
+
+// worklistCycle é UM ciclo do modo worklist: busca a lista de pendentes pela API
+// (agent=olhos) e sincroniza (syncer=mãos), SEM varrer o FS. Usado pelo loop do
+// serviço (cycle) e pelo one-shot --worklist-api. Erros de config/rede não
+// derrubam o serviço — logam e viram heartbeat, e o próximo ciclo tenta de novo.
+func (p *program) worklistCycle() {
+	pay := map[string]any{"modo": modo(p.dryRun), "fonte": "worklist-api"}
+	defer func() { postHeartbeat(p.ctx, p.apiURL, p.secret, p.name, pay) }()
+
+	if len(p.empresas) == 0 {
+		log.Print("worklist: TRACKER_SYNCER_EMPRESAS vazio — allowlist obrigatória, ciclo pulado")
+		pay["error"] = "allowlist vazia"
+		return
+	}
+	roots, err := p.sn.RootsForEmpresas(p.ctx, p.empresas)
+	if err != nil {
+		log.Printf("worklist: mapear empresas->CNPJ: %v", err)
+		pay["error"] = err.Error()
+		return
+	}
+	if len(roots) == 0 {
+		log.Printf("worklist: nenhuma filial com CNPJ p/ as empresas %v — ciclo pulado", p.empresas)
+		pay["error"] = "sem CNPJ para a allowlist"
+		return
+	}
+	since := firstDayPrevMonth(time.Now())
+	limit := envInt("TRACKER_SYNCER_MAX_SCAN", 5000)
+	items, err := syncer.FetchWorklistAPI(p.ctx, p.apiURL, p.secret, roots, p.filialMax, since, limit)
+	if err != nil {
+		log.Printf("worklist fetch: %v", err)
+		pay["error"] = err.Error()
+		return
+	}
+	res, err := p.sn.RunWorklist(p.ctx, items)
+	pay["fetched"] = res.Fetched
+	pay["planejados"] = res.Planned
+	pay["executados"] = res.Executed
+	pay["erros"] = res.Errors
+	pay["chave_divergente"] = res.Mismatch
+	pay["sem_path"] = res.NoPath
+	for k, v := range res.Skips {
+		pay["skip_"+k] = v
+	}
+	if err != nil {
+		log.Printf("worklist: %v", err)
+		pay["error"] = err.Error()
+	}
 }
 
 func (p *program) Stop(service.Service) error {
@@ -221,6 +278,14 @@ func (p *program) build(dryRun, allowStale bool) {
 		}
 	}
 	p.ctx, p.cancel = context.WithCancel(ctx)
+
+	// Modo worklist como serviço (agent=olhos, syncer=mãos): cada ciclo busca a
+	// lista de pendentes pela API em vez de varrer o FS. A allowlist e o teto de
+	// filial vêm de env (o serviço roda sem flags). Validação da allowlist é no
+	// worklistCycle (não fatal — não queremos crash-loop do serviço por misconfig).
+	p.worklistMode = strings.EqualFold(os.Getenv("TRACKER_SYNCER_MODE"), "worklist")
+	p.empresas = sortedKeys(parseEmpresas(os.Getenv("TRACKER_SYNCER_EMPRESAS")))
+	p.filialMax = envInt("TRACKER_SYNCER_FILIAL_MAX", 0)
 }
 
 // syncerInserter espelha a interface não-exportada do pacote syncer — um wr nil
@@ -458,36 +523,18 @@ func main() {
 		return
 	}
 
-	// Worklist via API (produção): mesmo fluxo do --worklist, mas busca a lista
-	// pela API do tracker (POST HMAC) porque a 5432 não é exposta do SRVIMPORT.
+	// Worklist via API (produção): one-shot do MESMO worklistCycle que o serviço
+	// roda em loop (build lê allowlist/filial-max do env; --filial-max sobrepõe).
 	if *worklistAPI {
-		empresas := sortedKeys(parseEmpresas(os.Getenv("TRACKER_SYNCER_EMPRESAS")))
-		if len(empresas) == 0 {
-			log.Fatal("--worklist-api exige TRACKER_SYNCER_EMPRESAS (allowlist) — não sincronizamos tudo sem cerca")
-		}
 		prg.build(dryRun, *allowStale)
 		defer prg.closeAll()
-		roots, err := prg.sn.RootsForEmpresas(prg.ctx, empresas)
-		if err != nil {
-			log.Fatalf("worklist-api: mapear empresas->CNPJ: %v", err)
+		if *filialMax > 0 {
+			prg.filialMax = *filialMax
 		}
-		if len(roots) == 0 {
-			log.Fatalf("worklist-api: nenhuma filial com CNPJ encontrada p/ as empresas %v", empresas)
+		if len(prg.empresas) == 0 {
+			log.Fatal("--worklist-api exige TRACKER_SYNCER_EMPRESAS (allowlist) — não sincronizamos tudo sem cerca")
 		}
-		since := firstDayPrevMonth(time.Now())
-		limit := envInt("TRACKER_SYNCER_MAX_SCAN", 5000)
-		items, err := syncer.FetchWorklistAPI(prg.ctx, prg.apiURL, prg.secret, roots, *filialMax, since, limit)
-		if err != nil {
-			log.Fatalf("worklist-api fetch: %v", err)
-		}
-		log.Printf("worklist-api: %d nota(s) pendente(s) de sync (empresas=%v cnpj-base=%v filial<=%d emissão>=%s)",
-			len(items), empresas, roots, *filialMax, since.Format("2006-01-02"))
-		res, err := prg.sn.RunWorklist(prg.ctx, items)
-		if err != nil {
-			log.Fatalf("worklist-api: %v", err)
-		}
-		log.Printf("worklist concluída: fetched=%d planejados=%d executados=%d chave_divergente=%d sem_path=%d erros=%d",
-			res.Fetched, res.Planned, res.Executed, res.Mismatch, res.NoPath, res.Errors)
+		prg.worklistCycle()
 		return
 	}
 
